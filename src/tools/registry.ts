@@ -1,8 +1,9 @@
 /**
  * Tool Registry - 9 Public Tools
- * Fork change (home-mcp): sending (send_email, reply_email, forward_email) and
- * move_to_deleted are separate tools so each can require approval in the MCP
- * client. Permanent delete and config setup_reset were removed.
+ * Fork change (home-mcp): this server cannot send email. draft_email,
+ * draft_reply and draft_forward save to the Drafts folder and the user sends
+ * from their own mail app. move_to_deleted is a separate tool. Permanent
+ * delete and config setup_reset were removed.
  *
  * Credential-aware: when state is 'awaiting_setup', tools return instructions
  * for supplying credentials (EMAIL_CREDENTIALS or the `email auth` CLI).
@@ -21,9 +22,9 @@ import {
 import { getState } from '../credential-state.js'
 import { type AttachmentsInput, attachments } from './composite/attachments.js'
 import { type ConfigInput, handleConfig } from './composite/config.js'
+import { type DraftInput, draft } from './composite/drafts.js'
 import { type FoldersInput, folders } from './composite/folders.js'
 import { type MessagesInput, type MoveToDeletedInput, messages, moveToDeletedTool } from './composite/messages.js'
-import { type SendInput, send } from './composite/send.js'
 // Import mega tools
 import { type AccountConfig, loadConfig } from './helpers/config.js'
 import { aiReadableMessage, EmailMCPError, enhanceError, findClosestMatch } from './helpers/errors.js'
@@ -43,9 +44,9 @@ const DOCS_DIR = __dirname.endsWith('bin')
  */
 const RESOURCES = [
   { uri: 'email://docs/messages', name: 'Messages Tool Docs', file: 'messages.md' },
-  { uri: 'email://docs/send_email', name: 'Send Email Tool Docs', file: 'sending.md' },
-  { uri: 'email://docs/reply_email', name: 'Reply Email Tool Docs', file: 'sending.md' },
-  { uri: 'email://docs/forward_email', name: 'Forward Email Tool Docs', file: 'sending.md' },
+  { uri: 'email://docs/draft_email', name: 'Draft Email Tool Docs', file: 'drafts.md' },
+  { uri: 'email://docs/draft_reply', name: 'Draft Reply Tool Docs', file: 'drafts.md' },
+  { uri: 'email://docs/draft_forward', name: 'Draft Forward Tool Docs', file: 'drafts.md' },
   { uri: 'email://docs/move_to_deleted', name: 'Move To Deleted Tool Docs', file: 'move_to_deleted.md' },
   { uri: 'email://docs/folders', name: 'Folders Tool Docs', file: 'folders.md' },
   { uri: 'email://docs/attachments', name: 'Attachments Tool Docs', file: 'attachments.md' },
@@ -75,7 +76,7 @@ const TOOLS = [
   {
     name: 'messages',
     description:
-      'Search, read and organise email messages. Does not send or delete.\n\nActions (required params -> optional):\n- search (-> account, query="UNSEEN", folder="INBOX", limit=20)\n- read (account, uid -> folder, preview, max_chars)\n- mark_read / mark_unread / flag / unflag (account, uid|uids -> folder)\n- move (account, uid|uids, destination -> folder); cannot target Deleted Messages/Trash, use move_to_deleted\n- archive (account, uid|uids -> folder)\n\nRead preview mode returns at most max_chars (default 4000) and includes truncation metadata; omit preview for the full body.\n\nQuery examples: "UNREAD", "FROM user@example.com", "SINCE 2026-01-01", "UNREAD FROM boss@company.com". Date format MUST be YYYY-MM-DD.\n\nTo send use send_email, reply_email or forward_email. To delete use move_to_deleted.',
+      'Search, read and organise email messages. Does not send or delete.\n\nActions (required params -> optional):\n- search (-> account, query="UNSEEN", folder="INBOX", limit=20)\n- read (account, uid -> folder, preview, max_chars)\n- mark_read / mark_unread / flag / unflag (account, uid|uids -> folder)\n- move (account, uid|uids, destination -> folder); cannot target Deleted Messages/Trash, use move_to_deleted\n- archive (account, uid|uids -> folder)\n\nRead preview mode returns at most max_chars (default 4000) and includes truncation metadata; omit preview for the full body.\n\nQuery examples: "UNREAD", "FROM user@example.com", "SINCE 2026-01-01", "UNREAD FROM boss@company.com". Date format MUST be YYYY-MM-DD.\n\nThis server cannot send. To prepare an email use draft_email, draft_reply or draft_forward. To delete use move_to_deleted.',
     annotations: {
       title: 'Messages',
       readOnlyHint: false,
@@ -116,20 +117,20 @@ const TOOLS = [
     outputSchema: { type: 'object', additionalProperties: true }
   },
   {
-    name: 'send_email',
+    name: 'draft_email',
     description:
-      'Send a NEW email via SMTP. Sends immediately; it cannot be unsent.\n\nRequired: account (sender address), to, subject, body. Optional: cc, bcc (comma-separated), attachments (base64, max 10 files, 25MB total). Body may be plain text or HTML, not both.',
+      'Write a NEW email and save it to the Drafts folder. Does NOT send: the user reviews it and presses Send in their mail app. Always tell the user the draft is waiting in Drafts.\n\nRequired: account (sender address), to, subject, body. Optional: cc, bcc (comma-separated), attachments (base64, max 10 files, 25MB total). Body may be plain text or HTML, not both.',
     annotations: {
-      title: 'Send email',
+      title: 'Draft email',
       readOnlyHint: false,
-      destructiveHint: true,
+      destructiveHint: false,
       idempotentHint: false,
-      openWorldHint: true
+      openWorldHint: false
     },
     inputSchema: {
       type: 'object',
       properties: {
-        account: { type: 'string', description: 'Sender account email address' },
+        account: { type: 'string', description: 'Sender account email address (the draft is saved in this account)' },
         to: { type: 'string', description: 'Recipient email address(es), comma-separated' },
         subject: { type: 'string', description: 'Email subject' },
         body: { type: 'string', description: 'Email body. Use plain text or HTML, not both.' },
@@ -142,20 +143,20 @@ const TOOLS = [
     outputSchema: { type: 'object', additionalProperties: true }
   },
   {
-    name: 'reply_email',
+    name: 'draft_reply',
     description:
-      'Reply to an existing email via SMTP. Sends immediately; it cannot be unsent.\n\nRequired: account, uid (of the email being replied to), body. Optional: folder (default INBOX), to (defaults to the original sender), cc, bcc, attachments. Threading headers and "Re:" subject are set automatically.',
+      'Write a reply to an existing email and save it to the Drafts folder, with threading headers. Does NOT send: the user reviews it and presses Send in their mail app.\n\nRequired: account, uid (of the email being replied to), body. Optional: folder (default INBOX), to (defaults to the original sender), cc, bcc, attachments.',
     annotations: {
-      title: 'Reply to email',
+      title: 'Draft reply',
       readOnlyHint: false,
-      destructiveHint: true,
+      destructiveHint: false,
       idempotentHint: false,
-      openWorldHint: true
+      openWorldHint: false
     },
     inputSchema: {
       type: 'object',
       properties: {
-        account: { type: 'string', description: 'Sender account email address' },
+        account: { type: 'string', description: 'Sender account email address (the draft is saved in this account)' },
         uid: { type: 'number', description: 'UID of the email being replied to' },
         folder: { type: 'string', description: 'Folder of the original email (default: INBOX)' },
         body: { type: 'string', description: 'Reply body. Use plain text or HTML, not both.' },
@@ -169,20 +170,20 @@ const TOOLS = [
     outputSchema: { type: 'object', additionalProperties: true }
   },
   {
-    name: 'forward_email',
+    name: 'draft_forward',
     description:
-      'Forward an existing email via SMTP. Sends immediately; it cannot be unsent.\n\nRequired: account, uid (of the email to forward), to, body (your note). Optional: folder (default INBOX), cc, bcc, attachments.',
+      'Write a forward of an existing email and save it to the Drafts folder. Does NOT send: the user reviews it and presses Send in their mail app.\n\nRequired: account, uid (of the email to forward), to, body (your note). Optional: folder (default INBOX), cc, bcc, attachments.',
     annotations: {
-      title: 'Forward email',
+      title: 'Draft forward',
       readOnlyHint: false,
-      destructiveHint: true,
+      destructiveHint: false,
       idempotentHint: false,
-      openWorldHint: true
+      openWorldHint: false
     },
     inputSchema: {
       type: 'object',
       properties: {
-        account: { type: 'string', description: 'Sender account email address' },
+        account: { type: 'string', description: 'Sender account email address (the draft is saved in this account)' },
         uid: { type: 'number', description: 'UID of the email to forward' },
         folder: { type: 'string', description: 'Folder of the original email (default: INBOX)' },
         to: { type: 'string', description: 'Recipient email address(es), comma-separated' },
@@ -319,9 +320,9 @@ const TOOLS = [
           type: 'string',
           enum: [
             'messages',
-            'send_email',
-            'reply_email',
-            'forward_email',
+            'draft_email',
+            'draft_reply',
+            'draft_forward',
             'move_to_deleted',
             'folders',
             'attachments',
@@ -346,7 +347,7 @@ async function handleHelp(args: unknown): Promise<{ tool: string; documentation:
     throw new EmailMCPError(
       `Invalid tool name: ${toolName}`,
       'VALIDATION_ERROR',
-      'Valid: messages, send_email, reply_email, forward_email, move_to_deleted, folders, attachments, config, help'
+      'Valid: messages, draft_email, draft_reply, draft_forward, move_to_deleted, folders, attachments, config, help'
     )
   }
   const resource = RESOURCES.find((r) => r.uri === `email://docs/${toolName}`)
@@ -365,11 +366,10 @@ type ToolHandler = (accounts: AccountConfig[], args: unknown) => Promise<unknown
 
 const TOOL_HANDLERS: Record<string, ToolHandler> = {
   messages: (accounts, args) => messages(accounts, args as unknown as MessagesInput),
-  // Each outbound action is its own tool; the action is fixed by the tool name,
-  // never taken from the caller, so one tool cannot be used to do another's job.
-  send_email: (accounts, args) => send(accounts, { ...(args as object), action: 'new' } as SendInput),
-  reply_email: (accounts, args) => send(accounts, { ...(args as object), action: 'reply' } as SendInput),
-  forward_email: (accounts, args) => send(accounts, { ...(args as object), action: 'forward' } as SendInput),
+  // Each draft tool fixes its own action; it is never taken from the caller.
+  draft_email: (accounts, args) => draft(accounts, { ...(args as object), action: 'new' } as DraftInput),
+  draft_reply: (accounts, args) => draft(accounts, { ...(args as object), action: 'reply' } as DraftInput),
+  draft_forward: (accounts, args) => draft(accounts, { ...(args as object), action: 'forward' } as DraftInput),
   move_to_deleted: (accounts, args) => moveToDeletedTool(accounts, args as unknown as MoveToDeletedInput),
   folders: (accounts, args) => folders(accounts, args as unknown as FoldersInput),
   attachments: (accounts, args) => attachments(accounts, args as unknown as AttachmentsInput),

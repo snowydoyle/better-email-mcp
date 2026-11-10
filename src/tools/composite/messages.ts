@@ -86,7 +86,7 @@ export async function messages(accounts: AccountConfig[], input: MessagesInput):
       default:
         throw createUnknownActionError(
           input.action,
-          'search, read, mark_read, mark_unread, flag, unflag, move, archive (send with send_email / reply_email / forward_email; delete with move_to_deleted)'
+          'search, read, mark_read, mark_unread, flag, unflag, move, archive (draft with draft_email / draft_reply / draft_forward; delete with move_to_deleted)'
         )
     }
   })()

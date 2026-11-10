@@ -59,7 +59,7 @@ describe('CallToolRequestSchema handler coverage', () => {
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain("Unknown tool: message. Did you mean 'messages'?")
     expect(result.content[0].text).toContain(
-      'Available tools: messages, send_email, reply_email, forward_email, move_to_deleted, folders, attachments, config, help'
+      'Available tools: messages, draft_email, draft_reply, draft_forward, move_to_deleted, folders, attachments, config, help'
     )
   })
 

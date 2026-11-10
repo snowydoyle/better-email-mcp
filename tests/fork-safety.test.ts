@@ -24,6 +24,12 @@ describe('home-mcp fork safety', () => {
     }
   })
 
+  it('no source file can send email (no SMTP transport)', () => {
+    for (const file of files) {
+      expect(readFileSync(file, 'utf8'), file).not.toMatch(/createTransport|sendMail|smtp-connection|from 'nodemailer'/)
+    }
+  })
+
   it('no source file wires up a credential reset tool action', () => {
     for (const file of files) {
       expect(readFileSync(file, 'utf8'), file).not.toMatch(/(?<!function )resetState\(/)

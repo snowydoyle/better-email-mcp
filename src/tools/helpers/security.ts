@@ -20,9 +20,9 @@ const SAFETY_WARNING =
 /** Valid tool names for help documentation — prevents path traversal */
 const VALID_TOOL_NAMES = new Set([
   'messages',
-  'send_email',
-  'reply_email',
-  'forward_email',
+  'draft_email',
+  'draft_reply',
+  'draft_forward',
   'move_to_deleted',
   'folders',
   'attachments',

@@ -8,7 +8,7 @@ Get full documentation for any email MCP tool. Returns detailed usage instructio
 
 - Use when the compressed tool description is insufficient
 - Returns markdown documentation for the requested tool
-- Available for: messages, send_email, reply_email, forward_email, move_to_deleted, folders, attachments, config, help
+- Available for: messages, draft_email, draft_reply, draft_forward, move_to_deleted, folders, attachments, config, help
 
 ## Actions
 
@@ -23,7 +23,7 @@ This tool has no `action` parameter — it takes only `tool_name`.
 ## Valid tool_name values
 
 - `messages` — Search, read, and organise email messages
-- `send_email` / `reply_email` / `forward_email` — Send, reply to and forward email
+- `draft_email` / `draft_reply` / `draft_forward` — Save a new email, reply or forward to Drafts (never sends)
 - `move_to_deleted` — Move email to Deleted Messages / Trash (recoverable)
 - `folders` — List mailbox folders or read targeted IMAP STATUS metadata
 - `attachments` — List and download email attachments

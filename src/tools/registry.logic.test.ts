@@ -13,7 +13,7 @@ vi.mock('./composite/messages.js', () => ({
   moveToDeletedTool: vi.fn(),
   clearArchiveFolderCache: vi.fn()
 }))
-vi.mock('./composite/send.js', () => ({ send: vi.fn() }))
+vi.mock('./composite/drafts.js', () => ({ draft: vi.fn() }))
 vi.mock('./composite/folders.js', () => ({ folders: vi.fn() }))
 vi.mock('./composite/attachments.js', () => ({ attachments: vi.fn() }))
 vi.mock('./composite/config.js', () => ({ handleConfig: vi.fn() }))
@@ -100,9 +100,9 @@ describe('ListToolsRequestSchema handler', () => {
     const names = result.tools.map((t: { name: string }) => t.name)
     expect(names).toEqual([
       'messages',
-      'send_email',
-      'reply_email',
-      'forward_email',
+      'draft_email',
+      'draft_reply',
+      'draft_forward',
       'move_to_deleted',
       'folders',
       'attachments',
@@ -140,9 +140,9 @@ describe('ListResourcesRequestSchema handler', () => {
 
     const expectedUris = [
       'email://docs/messages',
-      'email://docs/send_email',
-      'email://docs/reply_email',
-      'email://docs/forward_email',
+      'email://docs/draft_email',
+      'email://docs/draft_reply',
+      'email://docs/draft_forward',
       'email://docs/move_to_deleted',
       'email://docs/folders',
       'email://docs/attachments',
@@ -199,12 +199,12 @@ describe('CallToolRequestSchema handler - successful tool calls', () => {
   })
 
   it.each([
-    ['send_email', 'new'],
-    ['reply_email', 'reply'],
-    ['forward_email', 'forward']
-  ])('%s always sends with action %s, whatever the caller passes', async (tool, action) => {
-    const { send } = await import('./composite/send.js')
-    vi.mocked(send).mockResolvedValue({ success: true } as any)
+    ['draft_email', 'new'],
+    ['draft_reply', 'reply'],
+    ['draft_forward', 'forward']
+  ])('%s always drafts with action %s, whatever the caller passes', async (tool, action) => {
+    const { draft } = await import('./composite/drafts.js')
+    vi.mocked(draft).mockResolvedValue({ sent: false } as any)
 
     const handlers = new Map<any, any>()
     const server = { setRequestHandler: vi.fn((schema: any, h: any) => handlers.set(schema, h)) } as any
@@ -215,7 +215,7 @@ describe('CallToolRequestSchema handler - successful tool calls', () => {
     await handler({
       params: { name: tool, arguments: { action: 'forward', account: 'user@example.com', uid: 1, body: 'b', to: 't' } }
     })
-    expect(vi.mocked(send).mock.calls.at(-1)?.[1]).toMatchObject({ action })
+    expect(vi.mocked(draft).mock.calls.at(-1)?.[1]).toMatchObject({ action })
   })
 
   it('routes move_to_deleted to its own handler, never to messages', async () => {

@@ -1,14 +1,12 @@
 /**
- * SMTP Client
- * Send, reply, and forward emails via SMTP using Nodemailer
+ * Message composer (fork change, home-mcp)
+ * Builds RFC2822 messages for the Drafts folder. This server has no SMTP sending.
  */
 
 import { marked } from 'marked'
-import { createTransport } from 'nodemailer'
 import type { AccountConfig } from './config.js'
 import { EmailMCPError } from './errors.js'
 import { EMAIL_SANITIZE_OPTIONS, sanitizeHtml } from './html-utils.js'
-import { ensureValidToken } from './oauth2.js'
 
 export interface EmailAttachment {
   filename: string
@@ -25,12 +23,6 @@ export interface SendEmailOptions {
   in_reply_to?: string
   references?: string
   attachments?: EmailAttachment[]
-}
-
-export interface SendResult {
-  success: boolean
-  message_id: string
-  raw?: Buffer
 }
 
 const MAX_ATTACHMENT_COUNT = 10
@@ -85,30 +77,6 @@ function mapAttachments(
   }))
 }
 
-/**
- * Create a Nodemailer transporter for the given account.
- * Enforces TLS for all connections to prevent STARTTLS downgrade attacks.
- * - Port 465: implicit TLS (secure: true)
- * - Port 587: STARTTLS with requireTLS to enforce upgrade
- * Uses OAuth2 XOAUTH2 for Outlook accounts with stored tokens.
- */
-function createSmtpTransport(account: AccountConfig) {
-  const isImplicitTls = account.smtp.secure || account.smtp.port === 465
-
-  const auth =
-    account.authType === 'oauth2'
-      ? { type: 'OAuth2' as const, user: account.email, accessToken: account.oauth2!.accessToken }
-      : { user: account.email, pass: account.password }
-
-  return createTransport({
-    host: account.smtp.host,
-    port: account.smtp.port,
-    secure: isImplicitTls,
-    requireTLS: !isImplicitTls,
-    auth
-  })
-}
-
 // ⚡ Bolt: Extract `marked` options into module-scoped constants.
 // This prevents recreating configuration objects on every function call,
 // significantly reducing allocation overhead during high-frequency email parsing.
@@ -129,168 +97,104 @@ export function textToHtml(text: string): string {
  * Build a raw RFC2822 message using Nodemailer's MailComposer.
  * Returns the exact bytes that can be sent via SMTP and/or appended to IMAP.
  */
-async function buildRawMessage(mailOptions: {
-  from: string
-  to: string
-  cc?: string
-  bcc?: string
-  subject: string
-  text: string
-  html: string
-  inReplyTo?: string
-  references?: string
-  attachments?: Array<{ filename: string; content: Buffer; contentType?: string }>
-}): Promise<Buffer> {
+async function buildRawMessage(
+  mailOptions: {
+    from: string
+    to: string
+    cc?: string
+    bcc?: string
+    subject: string
+    text: string
+    html: string
+    inReplyTo?: string
+    references?: string
+    attachments?: Array<{ filename: string; content: Buffer; contentType?: string }>
+  },
+  keepBcc = false
+): Promise<Buffer> {
   // Dynamic import to avoid TypeScript issues with Nodemailer's internal module
   const { default: MailComposer } = await import('nodemailer/lib/mail-composer/index.js')
   const composer = new MailComposer(mailOptions)
-  return composer.compile().build()
+  const node = composer.compile()
+  // Drafts keep their Bcc header so it is still there when you send from Mail.
+  if (keepBcc) (node as { keepBcc?: boolean }).keepBcc = true
+  return node.build()
 }
 
-/**
- * Collect all recipient addresses for the SMTP envelope.
- * When sending raw messages, Nodemailer doesn't parse headers —
- * the envelope must be provided separately with all RCPT TO addresses.
- */
-function collectRecipients(...fields: (string | undefined)[]): string[] {
-  const result: string[] = []
-  for (let i = 0; i < fields.length; i++) {
-    const field = fields[i]
-    if (!field) continue
-    const parts = field.split(',')
-    for (let j = 0; j < parts.length; j++) {
-      const trimmed = parts[j]!.trim()
-      if (trimmed) result.push(trimmed)
-    }
-  }
-  return result
-}
+// ============================================================================
+// Fork change (home-mcp): this server cannot send email. The SMTP transport
+// and the send functions were removed. Messages are composed here and saved
+// to the Drafts folder; the user sends them from their own mail app.
+// ============================================================================
 
-/**
- * Send a raw RFC2822 message via SMTP and return both the result and raw bytes.
- * Requires an explicit envelope because Nodemailer doesn't extract recipients
- * from raw message headers for SMTP delivery.
- */
-async function sendRawMessage(
-  account: AccountConfig,
-  raw: Buffer,
-  envelope: { from: string; to: string[] }
-): Promise<{ messageId: string }> {
-  // For OAuth2, ensure fresh token before creating transport
-  if (account.authType === 'oauth2') {
-    await ensureValidToken(account, { allowInteractive: true })
-  }
-
-  const transport = createSmtpTransport(account)
-  try {
-    const result = await transport.sendMail({ raw, envelope })
-    return { messageId: result.messageId || '' }
-  } finally {
-    transport.close()
-  }
-}
-
-/**
- * Send a new email
- */
-export async function sendNewEmail(account: AccountConfig, options: SendEmailOptions): Promise<SendResult> {
+/** Compose a new email as raw RFC2822 bytes, without sending. */
+export async function composeNewEmail(account: AccountConfig, options: SendEmailOptions): Promise<Buffer> {
   validateAttachments(options.attachments)
   const attachments = mapAttachments(options.attachments)
-
-  const mailOptions = {
-    from: account.email,
-    to: options.to,
-    cc: options.cc,
-    bcc: options.bcc,
-    subject: options.subject,
-    text: options.body,
-    html: textToHtml(options.body),
-    ...(attachments ? { attachments } : {})
-  }
-
-  const raw = await buildRawMessage(mailOptions)
-  const recipients = collectRecipients(options.to, options.cc, options.bcc)
-  const result = await sendRawMessage(account, raw, { from: account.email, to: recipients })
-
-  return {
-    success: true,
-    message_id: result.messageId,
-    raw
-  }
+  return buildRawMessage(
+    {
+      from: account.email,
+      to: options.to,
+      cc: options.cc,
+      bcc: options.bcc,
+      subject: options.subject,
+      text: options.body,
+      html: textToHtml(options.body),
+      ...(attachments ? { attachments } : {})
+    },
+    true
+  )
 }
 
-/**
- * Reply to an email (maintains thread via In-Reply-To and References headers)
- */
-export async function replyToEmail(account: AccountConfig, options: SendEmailOptions): Promise<SendResult> {
+/** Compose a reply (with threading headers) as raw bytes, without sending. */
+export async function composeReply(account: AccountConfig, options: SendEmailOptions): Promise<Buffer> {
   if (!options.in_reply_to) {
     throw new EmailMCPError(
       'in_reply_to is required for reply',
       'MISSING_PARAM',
-      'Use email_read to get the message_id of the email you want to reply to'
+      'Read the original email first to get its message_id'
     )
   }
-
   validateAttachments(options.attachments)
   const attachments = mapAttachments(options.attachments)
-
   const subject = options.subject.startsWith('Re:') ? options.subject : `Re: ${options.subject}`
-
-  const mailOptions = {
-    from: account.email,
-    to: options.to,
-    cc: options.cc,
-    bcc: options.bcc,
-    subject,
-    text: options.body,
-    html: textToHtml(options.body),
-    inReplyTo: options.in_reply_to,
-    references: options.references || options.in_reply_to,
-    ...(attachments ? { attachments } : {})
-  }
-
-  const raw = await buildRawMessage(mailOptions)
-  const recipients = collectRecipients(options.to, options.cc, options.bcc)
-  const result = await sendRawMessage(account, raw, { from: account.email, to: recipients })
-
-  return {
-    success: true,
-    message_id: result.messageId,
-    raw
-  }
+  return buildRawMessage(
+    {
+      from: account.email,
+      to: options.to,
+      cc: options.cc,
+      bcc: options.bcc,
+      subject,
+      text: options.body,
+      html: textToHtml(options.body),
+      inReplyTo: options.in_reply_to,
+      references: options.references || options.in_reply_to,
+      ...(attachments ? { attachments } : {})
+    },
+    true
+  )
 }
 
-/**
- * Forward an email
- */
-export async function forwardEmail(
+/** Compose a forward (note above the original) as raw bytes, without sending. */
+export async function composeForward(
   account: AccountConfig,
   options: SendEmailOptions & { original_body: string }
-): Promise<SendResult> {
+): Promise<Buffer> {
   validateAttachments(options.attachments)
   const attachments = mapAttachments(options.attachments)
-
   const subject = options.subject.startsWith('Fwd:') ? options.subject : `Fwd: ${options.subject}`
   const body = `${options.body}\n\n---------- Forwarded message ----------\n${options.original_body}`
-
-  const mailOptions = {
-    from: account.email,
-    to: options.to,
-    cc: options.cc,
-    bcc: options.bcc,
-    subject,
-    text: body,
-    html: textToHtml(body),
-    ...(attachments ? { attachments } : {})
-  }
-
-  const raw = await buildRawMessage(mailOptions)
-  const recipients = collectRecipients(options.to, options.cc, options.bcc)
-  const result = await sendRawMessage(account, raw, { from: account.email, to: recipients })
-
-  return {
-    success: true,
-    message_id: result.messageId,
-    raw
-  }
+  return buildRawMessage(
+    {
+      from: account.email,
+      to: options.to,
+      cc: options.cc,
+      bcc: options.bcc,
+      subject,
+      text: body,
+      html: textToHtml(body),
+      ...(attachments ? { attachments } : {})
+    },
+    true
+  )
 }
