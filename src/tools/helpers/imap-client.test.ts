@@ -51,15 +51,18 @@ import { simpleParser } from 'mailparser'
 import {
   appendToFolder,
   clearSentFolderCache,
+  clearTrashFolderCache,
   getAttachment,
   getFolderStatus,
+  isTrashFolder,
   listFolders,
   modifyFlags,
   moveEmails,
+  moveToDeleted,
   readEmail,
   resolveSentFolder,
-  searchEmails,
-  trashEmails
+  resolveTrashFolder,
+  searchEmails
 } from './imap-client.js'
 import { ensureValidToken } from './oauth2.js'
 
@@ -603,13 +606,73 @@ describe('moveEmails', () => {
 // trashEmails
 // ============================================================================
 
-describe('trashEmails', () => {
-  it('deletes emails from folder', async () => {
-    const result = await trashEmails(account, [3, 4], 'INBOX')
+// Fork change (home-mcp): permanent delete removed; mail only moves to Deleted.
+describe('moveToDeleted', () => {
+  const icloudFolders = [
+    { name: 'INBOX', path: 'INBOX', flags: new Set(['\\HasNoChildren']), delimiter: '/' },
+    {
+      name: 'Deleted Messages',
+      path: 'Deleted Messages',
+      flags: new Set(['\\HasNoChildren', '\\Trash']),
+      delimiter: '/'
+    },
+    { name: 'Sent Messages', path: 'Sent Messages', flags: new Set(['\\Sent']), delimiter: '/' }
+  ]
 
-    expect(mockClient.messageDelete).toHaveBeenCalledWith({ uid: '3,4' })
-    expect(result.success).toBe(true)
-    expect(result.trashed).toBe(2)
+  beforeEach(() => {
+    clearTrashFolderCache()
+    mockClient.messageMove.mockClear()
+    mockClient.messageDelete.mockClear()
+    mockClient.messageFlagsAdd.mockClear()
+  })
+
+  it('moves to the folder flagged \\Trash (iCloud Deleted Messages) and never deletes', async () => {
+    mockClient.list.mockResolvedValue(icloudFolders)
+
+    const result = await moveToDeleted(account, [3, 4], 'INBOX')
+
+    expect(mockClient.messageMove).toHaveBeenCalledWith({ uid: '3,4' }, 'Deleted Messages')
+    expect(mockClient.messageDelete).not.toHaveBeenCalled()
+    expect(mockClient.messageFlagsAdd).not.toHaveBeenCalled()
+    expect(result).toEqual({ success: true, moved: 2, deleted_folder: 'Deleted Messages' })
+  })
+
+  it('falls back to a well-known name when no folder has the \\Trash flag', async () => {
+    mockClient.list.mockResolvedValue([
+      { name: 'INBOX', path: 'INBOX', flags: new Set(), delimiter: '/' },
+      { name: 'Trash', path: 'Trash', flags: new Set(), delimiter: '/' }
+    ])
+    expect(await resolveTrashFolder(account)).toBe('Trash')
+  })
+
+  it('changes nothing when no Deleted/Trash folder exists', async () => {
+    mockClient.list.mockResolvedValue([{ name: 'INBOX', path: 'INBOX', flags: new Set(), delimiter: '/' }])
+
+    await expect(moveToDeleted(account, [3], 'INBOX')).rejects.toThrow(/Could not find a Deleted Messages/)
+    expect(mockClient.messageMove).not.toHaveBeenCalled()
+    expect(mockClient.messageDelete).not.toHaveBeenCalled()
+  })
+
+  it('refuses mail already in Deleted Messages (no way to expunge it)', async () => {
+    mockClient.list.mockResolvedValue(icloudFolders)
+
+    await expect(moveToDeleted(account, [3], 'Deleted Messages')).rejects.toThrow(/already in Deleted Messages/)
+    expect(mockClient.messageMove).not.toHaveBeenCalled()
+    expect(mockClient.messageDelete).not.toHaveBeenCalled()
+  })
+
+  it('classifies Trash folders by flag or name', () => {
+    expect(isTrashFolder({ path: 'Papierkorb', flags: ['\\Trash'] })).toBe(true)
+    expect(isTrashFolder({ path: 'Deleted Messages', flags: [] })).toBe(true)
+    expect(isTrashFolder({ path: 'Archive', flags: ['\\Archive'] })).toBe(false)
+  })
+})
+
+describe('no permanent delete anywhere (home-mcp fork)', () => {
+  it('the module exports no trash/delete function', async () => {
+    const mod = await import('./imap-client.js')
+    expect(Object.keys(mod)).not.toContain('trashEmails')
+    expect(Object.keys(mod).filter((k) => /delete|expunge/i.test(k) && k !== 'moveToDeleted')).toEqual([])
   })
 })
 

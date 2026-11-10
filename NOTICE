@@ -4,3 +4,7 @@ Copyright 2026 n24q02m
 This product includes contributions originally licensed under the MIT License.
 Those terms are preserved in LICENSE-MIT and continue to apply to the portions
 they cover.
+
+Modified by snowydoyle (home-mcp fork, branch `home-mcp`), November 2026.
+The modifications are listed in CHANGES-FORK.md. They are provided under the
+same Apache License, Version 2.0.

@@ -3,7 +3,7 @@
 Manage email credential setup and runtime configuration.
 
 ### Description
-This tool reports the status of your email credentials, explains how to set them up, resets saved configuration, re-checks credential state after external changes, and manages runtime caches. Credentials come from environment variables, the legacy encrypted config (read-only), or saved Outlook OAuth tokens. There is no web credential form; set credentials with env vars or the `email auth outlook <address>` CLI command.
+This tool reports the status of your email credentials, explains how to set them up, re-checks credential state after external changes, and manages runtime caches. Credentials come from environment variables, the legacy encrypted config (read-only), or saved Outlook OAuth tokens. There is no web credential form; set credentials with env vars or the `email auth outlook <address>` CLI command.
 
 ### Actions
 
@@ -31,15 +31,7 @@ Explain how to configure credentials. Returns a `message` and the current `state
 }
 ```
 
-#### 4. setup_reset
-Delete the saved config and reset to the `awaiting_setup` state.
-```json
-{
-  "action": "setup_reset"
-}
-```
-
-#### 5. setup_complete
+#### 4. setup_complete
 Re-check credential state after external config changes (for example after editing env vars or running `email auth outlook`). Returns `previous_state`, `state`, and the `accounts` list.
 ```json
 {
@@ -47,7 +39,7 @@ Re-check credential state after external config changes (for example after editi
 }
 ```
 
-#### 6. set
+#### 5. set
 Update a runtime setting. Email MCP has no runtime settings; always returns `ok: false`.
 ```json
 {
@@ -55,7 +47,7 @@ Update a runtime setting. Email MCP has no runtime settings; always returns `ok:
 }
 ```
 
-#### 7. cache_clear
+#### 6. cache_clear
 Clear all in-memory caches (sent folder paths, archive folder paths, OAuth token cache).
 Returns the number of cache entries cleared.
 ```json

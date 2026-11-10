@@ -1,3 +1,13 @@
 {
-  "tools": ["messages", "folders", "attachments", "config", "help"]
+  "tools": [
+    "messages",
+    "send_email",
+    "reply_email",
+    "forward_email",
+    "move_to_deleted",
+    "folders",
+    "attachments",
+    "config",
+    "help"
+  ]
 }

@@ -2,28 +2,34 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AccountConfig } from '../helpers/config.js'
 
 // --- Mocks ---
-vi.mock('../helpers/imap-client.js', () => ({
-  searchEmails: vi.fn(),
-  readEmail: vi.fn(),
-  modifyFlags: vi.fn(),
-  moveEmails: vi.fn(),
-  trashEmails: vi.fn(),
-  listFolders: vi.fn()
-}))
+vi.mock('../helpers/imap-client.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../helpers/imap-client.js')>()
+  return {
+    searchEmails: vi.fn(),
+    readEmail: vi.fn(),
+    modifyFlags: vi.fn(),
+    moveEmails: vi.fn(),
+    moveToDeleted: vi.fn(),
+    listFolders: vi.fn(),
+    // Pure folder classifiers stay real so the guard is tested for real.
+    isTrashFolder: actual.isTrashFolder,
+    isTrashFolderName: actual.isTrashFolderName
+  }
+})
 
 vi.mock('./send.js', () => ({
   send: vi.fn()
 }))
 
-import { listFolders, modifyFlags, moveEmails, readEmail, searchEmails, trashEmails } from '../helpers/imap-client.js'
-import { clearArchiveFolderCache, messages } from './messages.js'
+import { listFolders, modifyFlags, moveEmails, moveToDeleted, readEmail, searchEmails } from '../helpers/imap-client.js'
+import { clearArchiveFolderCache, messages, moveToDeletedTool } from './messages.js'
 import { send } from './send.js'
 
 const mockSearchEmails = vi.mocked(searchEmails)
 const mockReadEmail = vi.mocked(readEmail)
 const mockModifyFlags = vi.mocked(modifyFlags)
 const mockMoveEmails = vi.mocked(moveEmails)
-const mockTrashEmails = vi.mocked(trashEmails)
+const mockMoveToDeleted = vi.mocked(moveToDeleted)
 const mockListFolders = vi.mocked(listFolders)
 const mockSend = vi.mocked(send)
 
@@ -297,6 +303,10 @@ describe('messages - unflag', () => {
 
 describe('messages - move', () => {
   it('moves emails to destination folder', async () => {
+    mockListFolders.mockResolvedValue([
+      { name: 'Archive', path: 'Archive', flags: ['\\Archive'], delimiter: '/' },
+      { name: 'Deleted Messages', path: 'Deleted Messages', flags: ['\\Trash'], delimiter: '/' }
+    ])
     mockMoveEmails.mockResolvedValue({ success: true, moved: 2 })
 
     const result = await messages(accounts, {
@@ -321,6 +331,33 @@ describe('messages - move', () => {
     await expect(messages(accounts, { action: 'move', uid: 1, account: 'user1@gmail.com' })).rejects.toThrow(
       'destination is required'
     )
+  })
+
+  // Fork change (home-mcp): moving into Deleted/Trash must use move_to_deleted.
+  it.each(['Deleted Messages', 'deleted messages', 'Trash', '[Gmail]/Trash', 'Deleted Items', 'Bin'])(
+    'refuses a well-known Deleted/Trash name (%s) without touching IMAP',
+    async (destination) => {
+      await expect(
+        messages(accounts, { action: 'move', uid: 1, destination, account: 'user1@gmail.com' })
+      ).rejects.toThrow(/move_to_deleted/)
+      expect(mockMoveEmails).not.toHaveBeenCalled()
+    }
+  )
+
+  it('refuses a folder flagged \\Trash even with an unusual name', async () => {
+    mockListFolders.mockResolvedValue([{ name: 'Papierkorb', path: 'Papierkorb', flags: ['\\Trash'], delimiter: '/' }])
+    await expect(
+      messages(accounts, { action: 'move', uid: 1, destination: 'Papierkorb', account: 'user1@gmail.com' })
+    ).rejects.toThrow(/move_to_deleted/)
+    expect(mockMoveEmails).not.toHaveBeenCalled()
+  })
+
+  it('fails closed when the folder list cannot be read', async () => {
+    mockListFolders.mockRejectedValue(new Error('IMAP down'))
+    await expect(
+      messages(accounts, { action: 'move', uid: 1, destination: 'Receipts', account: 'user1@gmail.com' })
+    ).rejects.toThrow(/Could not check the destination folder/)
+    expect(mockMoveEmails).not.toHaveBeenCalled()
   })
 })
 
@@ -395,14 +432,21 @@ describe('messages - archive', () => {
 // trash
 // ============================================================================
 
-describe('messages - trash', () => {
-  it('trashes emails', async () => {
-    mockTrashEmails.mockResolvedValue({ success: true, trashed: 1 })
-
-    const result = await messages(accounts, { action: 'trash', uid: 99, account: 'user1@gmail.com' })
-
-    expect(result.action).toBe('trash')
-    expect(mockTrashEmails).toHaveBeenCalledWith(accounts[0], [99], 'INBOX')
+describe('messages - removed actions (home-mcp fork)', () => {
+  it.each(['trash', 'new', 'reply', 'forward'])('rejects %s and calls neither IMAP nor SMTP', async (action) => {
+    await expect(
+      messages(accounts, {
+        action: action as any,
+        uid: 99,
+        account: 'user1@gmail.com',
+        to: 'x@example.com',
+        subject: 's',
+        body: 'b'
+      } as any)
+    ).rejects.toThrow()
+    expect(mockSend).not.toHaveBeenCalled()
+    expect(mockMoveEmails).not.toHaveBeenCalled()
+    expect(mockMoveToDeleted).not.toHaveBeenCalled()
   })
 })
 
@@ -419,38 +463,6 @@ describe('messages - unknown action', () => {
 // ============================================================================
 // outbound actions
 // ============================================================================
-
-describe('messages - outbound actions', () => {
-  it.each([
-    {
-      action: 'new',
-      account: 'user1@gmail.com',
-      to: 'recipient@test.com',
-      subject: 'Hello',
-      body: 'Message body'
-    },
-    {
-      action: 'reply',
-      account: 'user1@gmail.com',
-      uid: 42,
-      body: 'Reply body'
-    },
-    {
-      action: 'forward',
-      account: 'user1@gmail.com',
-      uid: 42,
-      to: 'recipient@test.com',
-      body: 'Forward body'
-    }
-  ])('routes $action to the internal SMTP implementation', async (input) => {
-    mockSend.mockResolvedValue({ action: input.action, success: true })
-
-    const result = await messages(accounts, input as any)
-
-    expect(result).toEqual({ action: input.action, success: true })
-    expect(mockSend).toHaveBeenCalledWith(accounts, input)
-  })
-})
 
 // ============================================================================
 // account resolution
@@ -599,23 +611,22 @@ describe('messages - archive (extended)', () => {
 // trash — extended coverage
 // ============================================================================
 
-describe('messages - trash (extended)', () => {
+describe('move_to_deleted tool', () => {
   it('throws when no uid or uids provided', async () => {
-    await expect(messages(accounts, { action: 'trash', account: 'user1@gmail.com' })).rejects.toThrow(
-      'uid or uids required'
-    )
+    await expect(moveToDeletedTool(accounts, { account: 'user1@gmail.com' })).rejects.toThrow('uid or uids required')
+    expect(mockMoveToDeleted).not.toHaveBeenCalled()
   })
 
-  it('supports batch uids', async () => {
-    mockTrashEmails.mockResolvedValue({ success: true, trashed: 3 })
+  it('moves a single uid from INBOX by default', async () => {
+    mockMoveToDeleted.mockResolvedValue({ success: true, moved: 1, deleted_folder: 'Deleted Messages' })
+    const result = await moveToDeletedTool(accounts, { uid: 99, account: 'user1@gmail.com' })
+    expect(mockMoveToDeleted).toHaveBeenCalledWith(accounts[0], [99], 'INBOX')
+    expect(result).toMatchObject({ action: 'move_to_deleted', deleted_folder: 'Deleted Messages', moved: 1 })
+  })
 
-    const result = await messages(accounts, {
-      action: 'trash',
-      uids: [10, 20, 30],
-      account: 'user1@gmail.com'
-    })
-
-    expect(result.action).toBe('trash')
-    expect(mockTrashEmails).toHaveBeenCalledWith(accounts[0], [10, 20, 30], 'INBOX')
+  it('supports batch uids and a source folder', async () => {
+    mockMoveToDeleted.mockResolvedValue({ success: true, moved: 3, deleted_folder: 'Deleted Messages' })
+    await moveToDeletedTool(accounts, { uids: [10, 20, 30], folder: 'Newsletters', account: 'user1@gmail.com' })
+    expect(mockMoveToDeleted).toHaveBeenCalledWith(accounts[0], [10, 20, 30], 'Newsletters')
   })
 })

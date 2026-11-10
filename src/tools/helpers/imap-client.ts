@@ -761,24 +761,90 @@ export async function moveEmails(
   })
 }
 
+// Fork change (home-mcp): permanent deletion was removed. Mail can only be
+// moved to the provider's Deleted/Trash folder, where it can be recovered.
+
+const TRASH_FOLDER_NAMES = [
+  'deleted messages',
+  'trash',
+  'deleted items',
+  'deleted',
+  'bin',
+  '[gmail]/trash',
+  '[gmail]/bin'
+]
+
+/** True when a folder is the account's Deleted/Trash folder (by \\Trash flag or well-known name). */
+export function isTrashFolder(folder: { path: string; flags: string[] }): boolean {
+  if (folder.flags.some((flag) => flag.toLowerCase() === '\\trash')) return true
+  return TRASH_FOLDER_NAMES.includes(folder.path.toLowerCase())
+}
+
+/** True when a bare path names a well-known Deleted/Trash folder. */
+export function isTrashFolderName(path: string): boolean {
+  return TRASH_FOLDER_NAMES.includes(path.trim().toLowerCase())
+}
+
+const trashFolderCache = new Map<string, Promise<string>>()
+
+/** Clear the Deleted/Trash folder path cache */
+export function clearTrashFolderCache(): number {
+  const count = trashFolderCache.size
+  trashFolderCache.clear()
+  return count
+}
+
 /**
- * Delete (trash) emails
+ * Resolve the Deleted/Trash folder path (iCloud: "Deleted Messages").
+ * Prefers the IMAP \\Trash special-use flag, then well-known names.
+ * Throws if none is found: we never fall back to deleting.
  */
-export async function trashEmails(
+export async function resolveTrashFolder(account: AccountConfig): Promise<string> {
+  const cached = trashFolderCache.get(account.id)
+  if (cached) return cached
+
+  const resolvePromise = (async () => {
+    const folders = await listFolders(account)
+    const byFlag = folders.find((f) => f.flags.some((flag) => flag.toLowerCase() === '\\trash'))
+    const byName = folders.find((f) => TRASH_FOLDER_NAMES.includes(f.path.toLowerCase()))
+    const found = byFlag ?? byName
+    if (!found) {
+      throw new EmailMCPError(
+        'Could not find a Deleted Messages / Trash folder for this account',
+        'TRASH_FOLDER_NOT_FOUND',
+        'Nothing was changed. Use the folders tool to check the folder list.'
+      )
+    }
+    return found.path
+  })()
+
+  trashFolderCache.set(account.id, resolvePromise)
+  try {
+    return await resolvePromise
+  } catch (err) {
+    trashFolderCache.delete(account.id)
+    throw err
+  }
+}
+
+/**
+ * Move emails to the Deleted/Trash folder. Never expunges or deletes.
+ */
+export async function moveToDeleted(
   account: AccountConfig,
   uids: number[],
   folder: string
-): Promise<{ success: boolean; trashed: number }> {
-  return withConnection(account, async (client) => {
-    const lock = await client.getMailboxLock(folder)
-    try {
-      const uidStr = uids.join(',')
-      await client.messageDelete({ uid: uidStr })
-      return { success: true, trashed: uids.length }
-    } finally {
-      lock.release()
-    }
-  })
+): Promise<{ success: boolean; moved: number; deleted_folder: string }> {
+  const deletedFolder = await resolveTrashFolder(account)
+  if (folder.toLowerCase() === deletedFolder.toLowerCase()) {
+    throw new EmailMCPError(
+      `These emails are already in ${deletedFolder}`,
+      'ALREADY_IN_DELETED',
+      'Nothing was changed. Permanent deletion is not available through this server.'
+    )
+  }
+  const result = await moveEmails(account, uids, folder, deletedFolder)
+  return { ...result, deleted_folder: deletedFolder }
 }
 
 /**

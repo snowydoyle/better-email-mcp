@@ -1,6 +1,8 @@
 /**
- * Tool Registry - 5 Public Tools
- * Consolidated registration for maximum coverage with minimal tools
+ * Tool Registry - 9 Public Tools
+ * Fork change (home-mcp): sending (send_email, reply_email, forward_email) and
+ * move_to_deleted are separate tools so each can require approval in the MCP
+ * client. Permanent delete and config setup_reset were removed.
  *
  * Credential-aware: when state is 'awaiting_setup', tools return instructions
  * for supplying credentials (EMAIL_CREDENTIALS or the `email auth` CLI).
@@ -20,7 +22,8 @@ import { getState } from '../credential-state.js'
 import { type AttachmentsInput, attachments } from './composite/attachments.js'
 import { type ConfigInput, handleConfig } from './composite/config.js'
 import { type FoldersInput, folders } from './composite/folders.js'
-import { type MessagesInput, messages } from './composite/messages.js'
+import { type MessagesInput, type MoveToDeletedInput, messages, moveToDeletedTool } from './composite/messages.js'
+import { type SendInput, send } from './composite/send.js'
 // Import mega tools
 import { type AccountConfig, loadConfig } from './helpers/config.js'
 import { aiReadableMessage, EmailMCPError, enhanceError, findClosestMatch } from './helpers/errors.js'
@@ -40,47 +43,52 @@ const DOCS_DIR = __dirname.endsWith('bin')
  */
 const RESOURCES = [
   { uri: 'email://docs/messages', name: 'Messages Tool Docs', file: 'messages.md' },
+  { uri: 'email://docs/send_email', name: 'Send Email Tool Docs', file: 'sending.md' },
+  { uri: 'email://docs/reply_email', name: 'Reply Email Tool Docs', file: 'sending.md' },
+  { uri: 'email://docs/forward_email', name: 'Forward Email Tool Docs', file: 'sending.md' },
+  { uri: 'email://docs/move_to_deleted', name: 'Move To Deleted Tool Docs', file: 'move_to_deleted.md' },
   { uri: 'email://docs/folders', name: 'Folders Tool Docs', file: 'folders.md' },
   { uri: 'email://docs/attachments', name: 'Attachments Tool Docs', file: 'attachments.md' },
   { uri: 'email://docs/help', name: 'Help Tool Docs', file: 'help.md' },
   { uri: 'email://docs/config', name: 'Config Tool Docs', file: 'config.md' }
 ]
 
+const ATTACHMENTS_SCHEMA = {
+  type: 'array',
+  description: 'File attachments to include (optional). Max 10 files, total decoded size <= 25MB.',
+  items: {
+    type: 'object',
+    properties: {
+      filename: { type: 'string', description: 'Attachment filename' },
+      content_base64: { type: 'string', description: 'File content encoded as base64' },
+      content_type: { type: 'string', description: 'MIME type (optional, e.g. application/pdf)' }
+    },
+    required: ['filename', 'content_base64']
+  }
+}
+
 /**
- * 5 Tools covering full email operations
+ * 9 Tools covering email operations
  * Compressed descriptions for token optimization
  */
 const TOOLS = [
   {
     name: 'messages',
     description:
-      'Search, read, manage, compose, and send email messages.\n\nActions (required params -> optional):\n- search (-> account, query="UNSEEN", folder="INBOX", limit=20)\n- read (account, uid -> folder, preview, max_chars)\n- mark_read / mark_unread / flag / unflag (account, uid|uids -> folder)\n- move (account, uid|uids, destination -> folder)\n- archive / trash (account, uid|uids -> folder)\n- new (account, to, subject, body -> cc, bcc, attachments)\n- reply (account, uid, body -> to, folder, attachments)\n- forward (account, uid, to, body -> folder, attachments)\n\nRead preview mode returns at most max_chars (default 4000) and includes truncation metadata; omit preview for the full body.\n\nQuery examples: "UNREAD", "FROM user@example.com", "SINCE 2026-01-01", "UNREAD FROM boss@company.com". Date format MUST be YYYY-MM-DD.\n\nOutbound bodies support plain text or HTML. Attachments use base64 content, max 10 files and 25MB decoded total.',
+      'Search, read and organise email messages. Does not send or delete.\n\nActions (required params -> optional):\n- search (-> account, query="UNSEEN", folder="INBOX", limit=20)\n- read (account, uid -> folder, preview, max_chars)\n- mark_read / mark_unread / flag / unflag (account, uid|uids -> folder)\n- move (account, uid|uids, destination -> folder); cannot target Deleted Messages/Trash, use move_to_deleted\n- archive (account, uid|uids -> folder)\n\nRead preview mode returns at most max_chars (default 4000) and includes truncation metadata; omit preview for the full body.\n\nQuery examples: "UNREAD", "FROM user@example.com", "SINCE 2026-01-01", "UNREAD FROM boss@company.com". Date format MUST be YYYY-MM-DD.\n\nTo send use send_email, reply_email or forward_email. To delete use move_to_deleted.',
     annotations: {
       title: 'Messages',
       readOnlyHint: false,
       destructiveHint: false,
-      idempotentHint: false,
-      openWorldHint: true
+      idempotentHint: true,
+      openWorldHint: false
     },
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: [
-            'search',
-            'read',
-            'mark_read',
-            'mark_unread',
-            'flag',
-            'unflag',
-            'move',
-            'archive',
-            'trash',
-            'new',
-            'reply',
-            'forward'
-          ],
+          enum: ['search', 'read', 'mark_read', 'mark_unread', 'flag', 'unflag', 'move', 'archive'],
           description: 'Action to perform'
         },
         account: { type: 'string', description: 'Account email filter (optional, defaults to all for search)' },
@@ -98,34 +106,115 @@ const TOOLS = [
           description: 'Preview body limit, integer 1-100000; defaults to 4000 when preview is true'
         },
         uids: { type: 'array', items: { type: 'number' }, description: 'Multiple UIDs for batch operations' },
-        destination: { type: 'string', description: 'Target folder for move action' },
-        to: {
+        destination: {
           type: 'string',
-          description:
-            'Recipient email address (required for new/forward, optional for reply - auto-derived from original sender)'
-        },
-        subject: { type: 'string', description: 'Email subject (required for new)' },
-        body: {
-          type: 'string',
-          description: 'Email body (required for new/reply/forward). Use plain text or HTML, not both.'
-        },
-        cc: { type: 'string', description: 'CC recipients (comma-separated)' },
-        bcc: { type: 'string', description: 'BCC recipients (comma-separated)' },
-        attachments: {
-          type: 'array',
-          description: 'File attachments to include (optional). Max 10 files, total decoded size <= 25MB.',
-          items: {
-            type: 'object',
-            properties: {
-              filename: { type: 'string', description: 'Attachment filename' },
-              content_base64: { type: 'string', description: 'File content encoded as base64' },
-              content_type: { type: 'string', description: 'MIME type (optional, e.g. application/pdf)' }
-            },
-            required: ['filename', 'content_base64']
-          }
+          description: 'Target folder for move action (not Deleted Messages/Trash; use move_to_deleted)'
         }
       },
       required: ['action']
+    },
+    outputSchema: { type: 'object', additionalProperties: true }
+  },
+  {
+    name: 'send_email',
+    description:
+      'Send a NEW email via SMTP. Sends immediately; it cannot be unsent.\n\nRequired: account (sender address), to, subject, body. Optional: cc, bcc (comma-separated), attachments (base64, max 10 files, 25MB total). Body may be plain text or HTML, not both.',
+    annotations: {
+      title: 'Send email',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        account: { type: 'string', description: 'Sender account email address' },
+        to: { type: 'string', description: 'Recipient email address(es), comma-separated' },
+        subject: { type: 'string', description: 'Email subject' },
+        body: { type: 'string', description: 'Email body. Use plain text or HTML, not both.' },
+        cc: { type: 'string', description: 'CC recipients (comma-separated)' },
+        bcc: { type: 'string', description: 'BCC recipients (comma-separated)' },
+        attachments: ATTACHMENTS_SCHEMA
+      },
+      required: ['account', 'to', 'subject', 'body']
+    },
+    outputSchema: { type: 'object', additionalProperties: true }
+  },
+  {
+    name: 'reply_email',
+    description:
+      'Reply to an existing email via SMTP. Sends immediately; it cannot be unsent.\n\nRequired: account, uid (of the email being replied to), body. Optional: folder (default INBOX), to (defaults to the original sender), cc, bcc, attachments. Threading headers and "Re:" subject are set automatically.',
+    annotations: {
+      title: 'Reply to email',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        account: { type: 'string', description: 'Sender account email address' },
+        uid: { type: 'number', description: 'UID of the email being replied to' },
+        folder: { type: 'string', description: 'Folder of the original email (default: INBOX)' },
+        body: { type: 'string', description: 'Reply body. Use plain text or HTML, not both.' },
+        to: { type: 'string', description: 'Override recipient (default: original sender)' },
+        cc: { type: 'string', description: 'CC recipients (comma-separated)' },
+        bcc: { type: 'string', description: 'BCC recipients (comma-separated)' },
+        attachments: ATTACHMENTS_SCHEMA
+      },
+      required: ['account', 'uid', 'body']
+    },
+    outputSchema: { type: 'object', additionalProperties: true }
+  },
+  {
+    name: 'forward_email',
+    description:
+      'Forward an existing email via SMTP. Sends immediately; it cannot be unsent.\n\nRequired: account, uid (of the email to forward), to, body (your note). Optional: folder (default INBOX), cc, bcc, attachments.',
+    annotations: {
+      title: 'Forward email',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        account: { type: 'string', description: 'Sender account email address' },
+        uid: { type: 'number', description: 'UID of the email to forward' },
+        folder: { type: 'string', description: 'Folder of the original email (default: INBOX)' },
+        to: { type: 'string', description: 'Recipient email address(es), comma-separated' },
+        body: { type: 'string', description: 'Message to include above the forwarded email' },
+        cc: { type: 'string', description: 'CC recipients (comma-separated)' },
+        bcc: { type: 'string', description: 'BCC recipients (comma-separated)' },
+        attachments: ATTACHMENTS_SCHEMA
+      },
+      required: ['account', 'uid', 'to', 'body']
+    },
+    outputSchema: { type: 'object', additionalProperties: true }
+  },
+  {
+    name: 'move_to_deleted',
+    description:
+      'Move emails to the Deleted Messages folder (iCloud) or Trash. Recoverable from that folder; this server cannot delete permanently.\n\nRequired: account, uid or uids. Optional: folder (where the emails are now, default INBOX).',
+    annotations: {
+      title: 'Move to Deleted Messages',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        account: { type: 'string', description: 'Account email' },
+        uid: { type: 'number', description: 'Email UID' },
+        uids: { type: 'array', items: { type: 'number' }, description: 'Multiple UIDs' },
+        folder: { type: 'string', description: 'Folder the emails are in now (default: INBOX)' }
+      },
+      required: ['account']
     },
     outputSchema: { type: 'object', additionalProperties: true }
   },
@@ -192,20 +281,20 @@ const TOOLS = [
   {
     name: 'config',
     description:
-      'Manage email credential setup and runtime configuration.\n\nSetup actions (credential lifecycle):\n- status: Show current credential state and configured accounts\n- setup_status: Show credential state only (no accounts list; cross-server parity action)\n- setup_start: Show how to supply credentials (EMAIL_CREDENTIALS env var or `email auth` CLI)\n- setup_reset: Clear stored credentials and reset to awaiting_setup state\n- setup_complete: Re-check credential state after credentials were supplied\n\nRuntime actions:\n- set: Update runtime settings (email has no runtime settings; returns ok=false)\n- cache_clear: Clear IMAP folder caches and the OAuth token cache',
+      'Manage email credential setup and runtime configuration.\n\nSetup actions (credential lifecycle):\n- status: Show current credential state and configured accounts\n- setup_status: Show credential state only (no accounts list; cross-server parity action)\n- setup_start: Show how to supply credentials (EMAIL_CREDENTIALS env var or `email auth` CLI)\n- setup_complete: Re-check credential state after credentials were supplied\n\nRuntime actions:\n- set: Update runtime settings (email has no runtime settings; returns ok=false)\n- cache_clear: Clear IMAP folder caches and the OAuth token cache',
     annotations: {
       title: 'Config',
-      readOnlyHint: false,
+      readOnlyHint: true,
       destructiveHint: false,
-      idempotentHint: false,
-      openWorldHint: true
+      idempotentHint: true,
+      openWorldHint: false
     },
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['status', 'setup_status', 'setup_start', 'setup_reset', 'setup_complete', 'set', 'cache_clear'],
+          enum: ['status', 'setup_status', 'setup_start', 'setup_complete', 'set', 'cache_clear'],
           description: 'Action to perform'
         }
       },
@@ -228,7 +317,17 @@ const TOOLS = [
       properties: {
         tool_name: {
           type: 'string',
-          enum: ['messages', 'folders', 'attachments', 'config', 'help'],
+          enum: [
+            'messages',
+            'send_email',
+            'reply_email',
+            'forward_email',
+            'move_to_deleted',
+            'folders',
+            'attachments',
+            'config',
+            'help'
+          ],
           description: 'Tool to get documentation for'
         }
       },
@@ -247,7 +346,7 @@ async function handleHelp(args: unknown): Promise<{ tool: string; documentation:
     throw new EmailMCPError(
       `Invalid tool name: ${toolName}`,
       'VALIDATION_ERROR',
-      'Valid: messages, folders, attachments, config, help'
+      'Valid: messages, send_email, reply_email, forward_email, move_to_deleted, folders, attachments, config, help'
     )
   }
   const resource = RESOURCES.find((r) => r.uri === `email://docs/${toolName}`)
@@ -266,6 +365,12 @@ type ToolHandler = (accounts: AccountConfig[], args: unknown) => Promise<unknown
 
 const TOOL_HANDLERS: Record<string, ToolHandler> = {
   messages: (accounts, args) => messages(accounts, args as unknown as MessagesInput),
+  // Each outbound action is its own tool; the action is fixed by the tool name,
+  // never taken from the caller, so one tool cannot be used to do another's job.
+  send_email: (accounts, args) => send(accounts, { ...(args as object), action: 'new' } as SendInput),
+  reply_email: (accounts, args) => send(accounts, { ...(args as object), action: 'reply' } as SendInput),
+  forward_email: (accounts, args) => send(accounts, { ...(args as object), action: 'forward' } as SendInput),
+  move_to_deleted: (accounts, args) => moveToDeletedTool(accounts, args as unknown as MoveToDeletedInput),
   folders: (accounts, args) => folders(accounts, args as unknown as FoldersInput),
   attachments: (accounts, args) => attachments(accounts, args as unknown as AttachmentsInput),
   config: (accounts, args) => handleConfig(accounts, args as unknown as ConfigInput),
@@ -360,15 +465,7 @@ export function registerTools(server: Server, initialAccounts: AccountConfig[]) 
         }
       }
 
-      const configInput = name === 'config' ? (args as unknown as ConfigInput) : undefined
       const result = await handler(accounts, args)
-
-      // A server instance is reused for every MCP request in one session. After a
-      // successful reset, clear the in-memory account snapshot as well as the
-      // durable store so the next tool call cannot continue with deleted credentials.
-      if (configInput?.action === 'setup_reset') {
-        accounts.length = 0
-      }
 
       const jsonText = JSON.stringify(result, null, 2)
       return {

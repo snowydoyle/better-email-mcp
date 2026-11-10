@@ -4,7 +4,9 @@
  * Replaces the former `setup` tool with canonical name `config`.
  *
  * Setup actions (credential lifecycle):
- *   status, setup_status, setup_start, setup_reset, setup_complete
+ *   status, setup_status, setup_start, setup_complete
+ *   (fork change, home-mcp: setup_reset removed; it could wipe the running
+ *   server's credentials from a tool call)
  *
  * Runtime config actions:
  *   set, cache_clear
@@ -15,15 +17,15 @@
  */
 
 import type { CredentialState } from '../../credential-state.js'
-import { getState, resetState, resolveCredentialState } from '../../credential-state.js'
+import { getState, resolveCredentialState } from '../../credential-state.js'
 import type { AccountConfig } from '../helpers/config.js'
 import { createUnknownActionError, withErrorHandling } from '../helpers/errors.js'
-import { clearSentFolderCache } from '../helpers/imap-client.js'
+import { clearSentFolderCache, clearTrashFolderCache } from '../helpers/imap-client.js'
 import { _resetTokenCache } from '../helpers/oauth2.js'
 import { clearArchiveFolderCache } from './messages.js'
 
 export interface ConfigInput {
-  action: 'status' | 'setup_status' | 'setup_start' | 'setup_reset' | 'setup_complete' | 'set' | 'cache_clear'
+  action: 'status' | 'setup_status' | 'setup_start' | 'setup_complete' | 'set' | 'cache_clear'
   key?: string
   value?: string
 }
@@ -41,12 +43,6 @@ interface ConfigSetupStatusResult {
 
 interface ConfigSetupStartResult {
   action: 'setup_start'
-  state: CredentialState
-  message: string
-}
-
-interface ConfigSetupResetResult {
-  action: 'setup_reset'
   state: CredentialState
   message: string
 }
@@ -74,7 +70,6 @@ type ConfigResult =
   | ConfigStatusResult
   | ConfigSetupStatusResult
   | ConfigSetupStartResult
-  | ConfigSetupResetResult
   | ConfigSetupCompleteResult
   | ConfigSetResult
   | ConfigCacheClearResult
@@ -94,9 +89,6 @@ export async function handleConfig(accounts: AccountConfig[], input: ConfigInput
       case 'setup_start':
         return handleSetupStart()
 
-      case 'setup_reset':
-        return await handleSetupReset()
-
       case 'setup_complete':
         return await handleSetupComplete(accounts)
 
@@ -109,7 +101,7 @@ export async function handleConfig(accounts: AccountConfig[], input: ConfigInput
       default:
         throw createUnknownActionError(
           input.action,
-          'status, setup_status, setup_start, setup_reset, setup_complete, set, cache_clear'
+          'status, setup_status, setup_start, setup_complete, set, cache_clear'
         )
     }
   })()
@@ -139,15 +131,6 @@ function handleSetupStart(): ConfigSetupStartResult {
   }
 }
 
-async function handleSetupReset(): Promise<ConfigSetupResetResult> {
-  await resetState()
-  return {
-    action: 'setup_reset',
-    state: getState(),
-    message: 'Credential state reset to awaiting_setup. Stored config deleted.'
-  }
-}
-
 async function handleSetupComplete(accounts: AccountConfig[]): Promise<ConfigSetupCompleteResult> {
   const previousState = getState()
   const newState = await resolveCredentialState()
@@ -170,8 +153,9 @@ function handleSet(): ConfigSetResult {
 function handleCacheClear(): ConfigCacheClearResult {
   const sentCount = clearSentFolderCache()
   const archiveCount = clearArchiveFolderCache()
+  const trashCount = clearTrashFolderCache()
   _resetTokenCache()
-  const cleared = sentCount + archiveCount
+  const cleared = sentCount + archiveCount + trashCount
   return {
     action: 'cache_clear',
     ok: true,

@@ -14,7 +14,8 @@ vi.mock('./messages.js', () => ({
 }))
 
 vi.mock('../helpers/imap-client.js', () => ({
-  clearSentFolderCache: vi.fn().mockReturnValue(1)
+  clearSentFolderCache: vi.fn().mockReturnValue(1),
+  clearTrashFolderCache: vi.fn().mockReturnValue(4)
 }))
 
 vi.mock('../helpers/oauth2.js', () => ({
@@ -22,7 +23,7 @@ vi.mock('../helpers/oauth2.js', () => ({
 }))
 
 import { getState, resetState, resolveCredentialState } from '../../credential-state.js'
-import { clearSentFolderCache } from '../helpers/imap-client.js'
+import { clearSentFolderCache, clearTrashFolderCache } from '../helpers/imap-client.js'
 import { _resetTokenCache } from '../helpers/oauth2.js'
 import { handleConfig } from './config.js'
 import { clearArchiveFolderCache } from './messages.js'
@@ -52,6 +53,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(clearArchiveFolderCache).mockReturnValue(2)
   vi.mocked(clearSentFolderCache).mockReturnValue(1)
+  vi.mocked(clearTrashFolderCache).mockReturnValue(4)
 })
 
 describe('config - status', () => {
@@ -110,19 +112,10 @@ describe('config - setup_start', () => {
   })
 })
 
-describe('config - setup_reset', () => {
-  it('resets state and returns confirmation', async () => {
-    mockResetState.mockResolvedValue(undefined)
-    mockGetState.mockReturnValue('awaiting_setup')
-
-    const result = await handleConfig(accounts, { action: 'setup_reset' })
-
-    expect(mockResetState).toHaveBeenCalledOnce()
-    expect(result).toEqual({
-      action: 'setup_reset',
-      state: 'awaiting_setup',
-      message: 'Credential state reset to awaiting_setup. Stored config deleted.'
-    })
+describe('config - setup_reset (removed in home-mcp fork)', () => {
+  it('is rejected as an unknown action and never touches stored credentials', async () => {
+    await expect(handleConfig(accounts, { action: 'setup_reset' } as any)).rejects.toThrow(/setup_reset/)
+    expect(mockResetState).not.toHaveBeenCalled()
   })
 })
 
@@ -175,11 +168,12 @@ describe('config - cache_clear', () => {
 
     expect(clearSentFolderCache).toHaveBeenCalledOnce()
     expect(clearArchiveFolderCache).toHaveBeenCalledOnce()
+    expect(clearTrashFolderCache).toHaveBeenCalledOnce()
     expect(_resetTokenCache).toHaveBeenCalledOnce()
     expect(result).toEqual({
       action: 'cache_clear',
       ok: true,
-      cleared: 3 // 1 (sent) + 2 (archive)
+      cleared: 7 // 1 (sent) + 2 (archive) + 4 (trash)
     })
   })
 })

@@ -6,8 +6,16 @@
 import type { AccountConfig } from '../helpers/config.js'
 import { resolveAccounts, resolveSingleAccount } from '../helpers/config.js'
 import { createUnknownActionError, EmailMCPError, withErrorHandling } from '../helpers/errors.js'
-import { listFolders, modifyFlags, moveEmails, readEmail, searchEmails, trashEmails } from '../helpers/imap-client.js'
-import { type SendInput, send } from './send.js'
+import {
+  isTrashFolder,
+  isTrashFolderName,
+  listFolders,
+  modifyFlags,
+  moveEmails,
+  moveToDeleted,
+  readEmail,
+  searchEmails
+} from '../helpers/imap-client.js'
 
 // Archive folder paths are cached per account to avoid repeated IMAP calls.
 const archiveFolderCache = new Map<string, Promise<string>>()
@@ -22,17 +30,7 @@ export function clearArchiveFolderCache(): number {
 }
 
 export interface MessagesInput {
-  action:
-    | 'search'
-    | 'read'
-    | 'mark_read'
-    | 'mark_unread'
-    | 'flag'
-    | 'unflag'
-    | 'move'
-    | 'archive'
-    | 'trash'
-    | SendInput['action']
+  action: 'search' | 'read' | 'mark_read' | 'mark_unread' | 'flag' | 'unflag' | 'move' | 'archive'
 
   // Target account (optional - defaults to all for search, first for others)
   account?: string
@@ -49,15 +47,11 @@ export interface MessagesInput {
   uids?: number[]
   // Move params
   destination?: string
-
-  // Send params
-  to?: string
-  subject?: string
-  body?: string
-  cc?: string
-  bcc?: string
-  attachments?: SendInput['attachments']
 }
+
+// Fork change (home-mcp): sending (new/reply/forward) and moving to Deleted
+// are separate tools so each can require approval in the MCP client.
+// Permanent delete was removed entirely.
 
 /**
  * Unified messages tool - handles all message operations
@@ -65,11 +59,6 @@ export interface MessagesInput {
 export async function messages(accounts: AccountConfig[], input: MessagesInput): Promise<any> {
   return withErrorHandling(async () => {
     switch (input.action) {
-      case 'new':
-      case 'reply':
-      case 'forward':
-        return await send(accounts, input as unknown as SendInput)
-
       case 'search':
         return await handleSearch(accounts, input)
 
@@ -94,13 +83,10 @@ export async function messages(accounts: AccountConfig[], input: MessagesInput):
       case 'archive':
         return await handleArchive(accounts, input)
 
-      case 'trash':
-        return await handleTrash(accounts, input)
-
       default:
         throw createUnknownActionError(
           input.action,
-          'new, reply, forward, search, read, mark_read, mark_unread, flag, unflag, move, archive, trash'
+          'search, read, mark_read, mark_unread, flag, unflag, move, archive (send with send_email / reply_email / forward_email; delete with move_to_deleted)'
         )
     }
   })()
@@ -250,6 +236,8 @@ async function handleMove(accounts: AccountConfig[], input: MessagesInput): Prom
   const account = resolveSingleAccount(accounts, input.account)
   const folder = input.folder || 'INBOX'
 
+  await assertNotDeletedFolder(account, input.destination)
+
   const result = await moveEmails(account, uids, folder, input.destination)
 
   return {
@@ -345,23 +333,58 @@ async function handleArchive(accounts: AccountConfig[], input: MessagesInput): P
 }
 
 /**
- * Trash emails
+ * Refuse a plain move into the Deleted/Trash folder: that must go through the
+ * separate move_to_deleted tool so it can require approval.
  */
-async function handleTrash(accounts: AccountConfig[], input: MessagesInput): Promise<any> {
-  const uids = input.uids || (input.uid ? [input.uid] : [])
-  if (uids.length === 0) {
-    throw new EmailMCPError('uid or uids required', 'VALIDATION_ERROR', 'Provide at least one email UID')
+async function assertNotDeletedFolder(account: AccountConfig, destination: string): Promise<void> {
+  const refuse = () => {
+    throw new EmailMCPError(
+      `move cannot target the Deleted/Trash folder ("${destination}"); use move_to_deleted`,
+      'USE_MOVE_TO_DELETED',
+      'Use the move_to_deleted tool instead. Nothing was changed.'
+    )
   }
-
-  const account = resolveSingleAccount(accounts, input.account)
-  const folder = input.folder || 'INBOX'
-
-  const result = await trashEmails(account, uids, folder)
-
-  return {
-    action: 'trash',
-    account: account.email,
-    folder,
-    ...result
+  if (isTrashFolderName(destination)) refuse()
+  let folders: Array<{ path: string; flags: string[] }>
+  try {
+    folders = await listFolders(account)
+  } catch (err) {
+    // Fail closed: without the folder list we cannot prove the destination is safe.
+    throw new EmailMCPError(
+      'Could not check the destination folder',
+      'FOLDER_CHECK_FAILED',
+      `Nothing was changed. ${err instanceof Error ? err.message : ''}`.trim()
+    )
   }
+  const target = folders.find((f) => f.path.toLowerCase() === destination.trim().toLowerCase())
+  if (target && isTrashFolder(target)) refuse()
+}
+
+export interface MoveToDeletedInput {
+  account?: string
+  uid?: number
+  uids?: number[]
+  folder?: string
+}
+
+/**
+ * move_to_deleted tool: move emails to Deleted Messages (iCloud) / Trash.
+ * Recoverable; never deletes permanently.
+ */
+export async function moveToDeletedTool(accounts: AccountConfig[], input: MoveToDeletedInput): Promise<any> {
+  return withErrorHandling(async () => {
+    const uids = input.uids || (input.uid ? [input.uid] : [])
+    if (uids.length === 0) {
+      throw new EmailMCPError('uid or uids required', 'VALIDATION_ERROR', 'Provide at least one email UID')
+    }
+    const account = resolveSingleAccount(accounts, input.account)
+    const folder = input.folder || 'INBOX'
+    const result = await moveToDeleted(account, uids, folder)
+    return {
+      action: 'move_to_deleted',
+      account: account.email,
+      from_folder: folder,
+      ...result
+    }
+  })()
 }

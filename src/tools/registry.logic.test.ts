@@ -8,7 +8,12 @@ import { describe, expect, it, vi } from 'vitest'
 import { EXTERNAL_CONTENT_TOOLS } from './helpers/security.js'
 
 // Mock composite tools
-vi.mock('./composite/messages.js', () => ({ messages: vi.fn(), clearArchiveFolderCache: vi.fn() }))
+vi.mock('./composite/messages.js', () => ({
+  messages: vi.fn(),
+  moveToDeletedTool: vi.fn(),
+  clearArchiveFolderCache: vi.fn()
+}))
+vi.mock('./composite/send.js', () => ({ send: vi.fn() }))
 vi.mock('./composite/folders.js', () => ({ folders: vi.fn() }))
 vi.mock('./composite/attachments.js', () => ({ attachments: vi.fn() }))
 vi.mock('./composite/config.js', () => ({ handleConfig: vi.fn() }))
@@ -83,7 +88,7 @@ function createMockServerWithHandlers() {
 }
 
 describe('ListToolsRequestSchema handler', () => {
-  it('should return exactly 5 tools with correct names', async () => {
+  it('should return exactly 9 tools with correct names', async () => {
     const { getHandler } = createMockServerWithHandlers()
     const handler = getHandler(ListToolsRequestSchema)
 
@@ -91,9 +96,19 @@ describe('ListToolsRequestSchema handler', () => {
 
     const result = await handler({})
 
-    expect(result.tools).toHaveLength(5)
+    expect(result.tools).toHaveLength(9)
     const names = result.tools.map((t: { name: string }) => t.name)
-    expect(names).toEqual(['messages', 'folders', 'attachments', 'config', 'help'])
+    expect(names).toEqual([
+      'messages',
+      'send_email',
+      'reply_email',
+      'forward_email',
+      'move_to_deleted',
+      'folders',
+      'attachments',
+      'config',
+      'help'
+    ])
   })
 
   it('declares outputSchema for every tool except help', async () => {
@@ -121,10 +136,14 @@ describe('ListResourcesRequestSchema handler', () => {
 
     const result = await handler({})
 
-    expect(result.resources).toHaveLength(5)
+    expect(result.resources).toHaveLength(9)
 
     const expectedUris = [
       'email://docs/messages',
+      'email://docs/send_email',
+      'email://docs/reply_email',
+      'email://docs/forward_email',
+      'email://docs/move_to_deleted',
       'email://docs/folders',
       'email://docs/attachments',
       'email://docs/help',
@@ -155,14 +174,10 @@ describe('ReadResourceRequestSchema handler', () => {
 })
 
 describe('CallToolRequestSchema handler - successful tool calls', () => {
-  it('clears the live account snapshot after a successful config reset', async () => {
+  it('keeps the live account snapshot when setup_reset is attempted (removed in home-mcp fork)', async () => {
     const { handleConfig } = await import('./composite/config.js')
     const { folders } = await import('./composite/folders.js')
-    vi.mocked(handleConfig).mockResolvedValue({
-      action: 'setup_reset',
-      state: 'awaiting_setup',
-      message: 'Credential state reset to awaiting_setup. Config file deleted.'
-    } as any)
+    vi.mocked(handleConfig).mockRejectedValue(new Error('Unknown action: setup_reset'))
     vi.mocked(folders).mockResolvedValue({ folders: [] })
 
     const handlers = new Map<any, any>()
@@ -175,15 +190,47 @@ describe('CallToolRequestSchema handler - successful tool calls', () => {
     registerTools(server, accounts)
     const handler = handlers.get(CallToolRequestSchema)
 
-    await handler({
-      params: { name: 'config', arguments: { action: 'setup_reset' } }
-    })
-    await handler({
-      params: { name: 'folders', arguments: { action: 'list' } }
-    })
+    const reset = await handler({ params: { name: 'config', arguments: { action: 'setup_reset' } } })
+    await handler({ params: { name: 'folders', arguments: { action: 'list' } } })
 
-    expect(accounts).toHaveLength(0)
-    expect(folders).toHaveBeenLastCalledWith([], { action: 'list' })
+    expect(reset.isError).toBe(true)
+    expect(accounts).toHaveLength(1)
+    expect(folders).toHaveBeenLastCalledWith(accounts, { action: 'list' })
+  })
+
+  it.each([
+    ['send_email', 'new'],
+    ['reply_email', 'reply'],
+    ['forward_email', 'forward']
+  ])('%s always sends with action %s, whatever the caller passes', async (tool, action) => {
+    const { send } = await import('./composite/send.js')
+    vi.mocked(send).mockResolvedValue({ success: true } as any)
+
+    const handlers = new Map<any, any>()
+    const server = { setRequestHandler: vi.fn((schema: any, h: any) => handlers.set(schema, h)) } as any
+    const accounts = [{ email: 'user@example.com' }] as any
+    registerTools(server, accounts)
+    const handler = handlers.get(CallToolRequestSchema)
+
+    await handler({
+      params: { name: tool, arguments: { action: 'forward', account: 'user@example.com', uid: 1, body: 'b', to: 't' } }
+    })
+    expect(vi.mocked(send).mock.calls.at(-1)?.[1]).toMatchObject({ action })
+  })
+
+  it('routes move_to_deleted to its own handler, never to messages', async () => {
+    const { moveToDeletedTool, messages } = await import('./composite/messages.js')
+    vi.mocked(moveToDeletedTool).mockResolvedValue({ success: true } as any)
+
+    const handlers = new Map<any, any>()
+    const server = { setRequestHandler: vi.fn((schema: any, h: any) => handlers.set(schema, h)) } as any
+    const accounts = [{ email: 'user@example.com' }] as any
+    registerTools(server, accounts)
+    const handler = handlers.get(CallToolRequestSchema)
+
+    await handler({ params: { name: 'move_to_deleted', arguments: { account: 'user@example.com', uid: 7 } } })
+    expect(moveToDeletedTool).toHaveBeenCalledWith(accounts, { account: 'user@example.com', uid: 7 })
+    expect(messages).not.toHaveBeenCalled()
   })
 
   it('should call messages function and return wrapped JSON result', async () => {
