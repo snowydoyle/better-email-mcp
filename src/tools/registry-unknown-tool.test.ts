@@ -45,7 +45,7 @@ describe('registerTools', () => {
     expect(result.content[0].text).toContain('Unknown tool: unknown_tool_name')
     // Verify it lists available tools
     expect(result.content[0].text).toContain(
-      'Available tools: messages, draft_email, draft_reply, draft_forward, move_to_deleted, folders, attachments, config, help'
+      'Available tools: messages, send_email, reply_email, forward_email, move_to_deleted, folders, attachments, config, help'
     )
   })
 })

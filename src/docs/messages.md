@@ -3,7 +3,7 @@
 ## Overview
 Email messages: search, read, mark_read, mark_unread, flag, unflag, move, archive.
 
-This tool never sends or deletes. This server cannot send email at all: `draft_email`, `draft_reply` and `draft_forward` save drafts for the user to send. Moving to Deleted Messages / Trash uses `move_to_deleted`. Permanent deletion is not available.
+This tool never sends or deletes. Sending uses the separate `send_email`, `reply_email` and `forward_email` tools; moving to Deleted Messages / Trash uses `move_to_deleted`. Permanent deletion is not available.
 
 ## Important
 - **read** returns the full clean plain-text body by default (HTML stripped for LLM token savings)

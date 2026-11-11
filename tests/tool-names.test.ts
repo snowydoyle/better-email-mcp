@@ -21,9 +21,9 @@ function parseToolNames(raw: string): string[] {
 const EXPECTED_TOOLS = parseToolNames(readFileSync(new URL('./fixtures/tools_expected.json', import.meta.url), 'utf8'))
 const EXPECTED_RESOURCES = [
   'email://docs/messages',
-  'email://docs/draft_email',
-  'email://docs/draft_reply',
-  'email://docs/draft_forward',
+  'email://docs/send_email',
+  'email://docs/reply_email',
+  'email://docs/forward_email',
   'email://docs/move_to_deleted',
   'email://docs/folders',
   'email://docs/attachments',
@@ -34,18 +34,18 @@ const EXPECTED_MESSAGE_ACTIONS = ['search', 'read', 'mark_read', 'mark_unread', 
 const EXPECTED_FOLDER_ACTIONS = ['list', 'status']
 const EXPECTED_HELP_TOPICS = [
   'messages',
-  'draft_email',
-  'draft_reply',
-  'draft_forward',
+  'send_email',
+  'reply_email',
+  'forward_email',
   'move_to_deleted',
   'folders',
   'attachments',
   'config',
   'help'
 ]
-// Fork change (home-mcp): this server cannot send. Drafting tools are separate
-// from reading; move_to_deleted is its own destructive tool.
-const DRAFT_TOOLS = ['draft_email', 'draft_reply', 'draft_forward']
+// Fork change (home-mcp): every action that sends or removes mail is its own tool,
+// flagged destructive, so an MCP client can require approval for each one.
+const APPROVAL_TOOLS = ['send_email', 'reply_email', 'forward_email', 'move_to_deleted']
 // Each case launches a fresh CLI process over stdio. On Windows with the
 // current MCP SDK, cold module startup under concurrent transform load can
 // exceed 30 seconds even though the protocol exchange itself completes normally.
@@ -111,14 +111,10 @@ describe('public MCP tool surface', { timeout: MCP_PROTOCOL_TEST_TIMEOUT_MS }, (
     const messages = result.tools.find((tool) => tool.name === 'messages')
     expect(messages?.inputSchema.properties?.action).toMatchObject({ enum: EXPECTED_MESSAGE_ACTIONS })
 
-    for (const name of DRAFT_TOOLS) {
+    for (const name of APPROVAL_TOOLS) {
       const tool = result.tools.find((t) => t.name === name)
-      expect(tool?.annotations).toMatchObject({ readOnlyHint: false, openWorldHint: false })
-      expect(tool?.description).toContain('Does NOT send')
+      expect(tool?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true })
     }
-    const del = result.tools.find((t) => t.name === 'move_to_deleted')
-    expect(del?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true })
-    expect(tools.some((name) => /^send|_send|reply_email|forward_email/.test(name))).toBe(false)
     expect(messages?.annotations).toMatchObject({ destructiveHint: false })
     const config = result.tools.find((tool) => tool.name === 'config')
     expect(config?.inputSchema.properties?.action).toMatchObject({
@@ -140,18 +136,18 @@ describe('public MCP tool surface', { timeout: MCP_PROTOCOL_TEST_TIMEOUT_MS }, (
     expect(EXPECTED_HELP_TOPICS).not.toContain('send')
   })
 
-  it('documents drafting in its own tools and keeps no way to send', async () => {
+  it('documents sending in its own tools and does not keep a send alias', async () => {
     const connectedClient = await connectServer()
     const helpResult = await connectedClient.callTool({
       name: 'help',
-      arguments: { tool_name: 'draft_email' }
+      arguments: { tool_name: 'send_email' }
     })
     const helpText = (helpResult.content as Array<{ type: string; text: string }>)[0]?.text ?? ''
 
     expect(helpResult.isError).toBeFalsy()
-    expect(helpText).toContain('### draft_email')
-    expect(helpText).toContain('### draft_reply')
-    expect(helpText).toContain('### draft_forward')
+    expect(helpText).toContain('### send_email')
+    expect(helpText).toContain('### reply_email')
+    expect(helpText).toContain('### forward_email')
 
     // Sending through messages is no longer possible.
     const viaMessages = await connectedClient.callTool({

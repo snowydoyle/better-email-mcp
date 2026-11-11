@@ -847,61 +847,6 @@ export async function moveToDeleted(
   return { ...result, deleted_folder: deletedFolder }
 }
 
-const draftsFolderCache = new Map<string, Promise<string>>()
-
-/** Clear the Drafts folder path cache */
-export function clearDraftsFolderCache(): number {
-  const count = draftsFolderCache.size
-  draftsFolderCache.clear()
-  return count
-}
-
-/**
- * Resolve the Drafts folder (IMAP \\Drafts flag, then the name "Drafts").
- * Throws if none is found, so a draft is never silently lost.
- */
-export async function resolveDraftsFolder(account: AccountConfig): Promise<string> {
-  const cached = draftsFolderCache.get(account.id)
-  if (cached) return cached
-
-  const resolvePromise = (async () => {
-    const folders = await listFolders(account)
-    const found =
-      folders.find((f) => f.flags.some((flag) => flag.toLowerCase() === '\\drafts')) ??
-      folders.find((f) => ['drafts', '[gmail]/drafts'].includes(f.path.toLowerCase()))
-    if (!found) {
-      throw new EmailMCPError(
-        'Could not find a Drafts folder for this account',
-        'DRAFTS_FOLDER_NOT_FOUND',
-        'Nothing was saved. Use the folders tool to check the folder list.'
-      )
-    }
-    return found.path
-  })()
-
-  draftsFolderCache.set(account.id, resolvePromise)
-  try {
-    return await resolvePromise
-  } catch (err) {
-    draftsFolderCache.delete(account.id)
-    throw err
-  }
-}
-
-/** Save a composed message to the Drafts folder, flagged as a draft. */
-export async function saveDraft(account: AccountConfig, raw: Buffer): Promise<{ drafts_folder: string }> {
-  const draftsFolder = await resolveDraftsFolder(account)
-  const saved = await appendToFolder(account, draftsFolder, raw, ['\\Draft', '\\Seen'])
-  if (!saved) {
-    throw new EmailMCPError(
-      'The mail server did not accept the draft',
-      'DRAFT_NOT_SAVED',
-      'Nothing was sent. Try again.'
-    )
-  }
-  return { drafts_folder: draftsFolder }
-}
-
 /**
  * List mailbox folders
  */

@@ -1,108 +1,496 @@
-import { simpleParser } from 'mailparser'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AccountConfig } from './config.js'
-import * as composer from './smtp-client.js'
-import { composeForward, composeNewEmail, composeReply } from './smtp-client.js'
+
+// --- Mocks (vi.hoisted ensures availability in vi.mock factory) ---
+const { mockSendMail, mockClose, mockBuild, MockMailComposer } = vi.hoisted(() => {
+  const mockBuild = vi.fn().mockResolvedValue(Buffer.from('raw-email-bytes'))
+  const mockCompile = vi.fn().mockReturnValue({ build: mockBuild })
+  // biome-ignore lint/complexity/useArrowFunction: must use function keyword for `new` constructor mock
+  const MockMailComposer = vi.fn(function () {
+    return { compile: mockCompile }
+  })
+  const mockSendMail = vi.fn()
+  const mockClose = vi.fn()
+  return { mockSendMail, mockClose, mockBuild, mockCompile, MockMailComposer }
+})
+
+vi.mock('nodemailer', () => ({
+  createTransport: vi.fn().mockImplementation(() => ({
+    sendMail: mockSendMail,
+    close: mockClose
+  }))
+}))
+
+vi.mock('nodemailer/lib/mail-composer/index.js', () => ({
+  default: MockMailComposer
+}))
+
+vi.mock('./oauth2.js', () => ({
+  ensureValidToken: vi.fn().mockResolvedValue('mock-access-token')
+}))
+
+import { createTransport } from 'nodemailer'
+import { ensureValidToken } from './oauth2.js'
+import { forwardEmail, replyToEmail, sendNewEmail } from './smtp-client.js'
 
 const account: AccountConfig = {
-  id: 'me_icloud_com',
-  email: 'me@icloud.com',
-  password: 'app-password',
-  imap: { host: 'imap.mail.me.com', port: 993, secure: true },
-  smtp: { host: 'smtp.mail.me.com', port: 587, secure: false }
+  id: 'test_gmail_com',
+  email: 'test@gmail.com',
+  password: 'testpass',
+  imap: { host: 'imap.gmail.com', port: 993, secure: true },
+  smtp: { host: 'smtp.gmail.com', port: 465, secure: true }
 }
 
-/** Unfold folded header lines so assertions can match whole headers. */
-function headers(raw: Buffer): string {
-  const text = raw.toString()
-  return text.slice(0, text.indexOf('\r\n\r\n')).replace(/\r\n[ \t]+/g, ' ')
-}
+beforeEach(() => {
+  vi.clearAllMocks()
+  mockSendMail.mockResolvedValue({ messageId: '<sent123@gmail.com>' })
+  mockBuild.mockResolvedValue(Buffer.from('raw-email-bytes'))
+})
 
-describe('composeNewEmail', () => {
-  it('builds a message from the account with to, cc, bcc and subject', async () => {
-    const raw = await composeNewEmail(account, {
-      to: 'a@example.com',
-      cc: 'c@example.com',
-      bcc: 'hidden@example.com',
+// ============================================================================
+// sendNewEmail
+// ============================================================================
+
+describe('sendNewEmail', () => {
+  it('sends email with correct parameters via raw message', async () => {
+    const result = await sendNewEmail(account, {
+      to: 'recipient@test.com',
       subject: 'Hello',
-      body: 'Hi there'
+      body: 'World',
+      cc: 'cc@test.com',
+      bcc: 'bcc@test.com'
     })
-    const h = headers(raw)
-    expect(h).toContain('From: me@icloud.com')
-    expect(h).toContain('To: a@example.com')
-    expect(h).toContain('Cc: c@example.com')
-    // Drafts keep Bcc so it is still set when the user presses Send.
-    expect(h).toContain('Bcc: hidden@example.com')
-    expect(h).toContain('Subject: Hello')
-    expect(h).toMatch(/Message-ID: <.+>/i)
+
+    expect(result.success).toBe(true)
+    expect(result.message_id).toBe('<sent123@gmail.com>')
+    expect(result.raw).toBeInstanceOf(Buffer)
+
+    // Verify MailComposer received correct options
+    const composerArgs = (MockMailComposer as any).mock.calls[0]![0]
+    expect(composerArgs.from).toBe('test@gmail.com')
+    expect(composerArgs.to).toBe('recipient@test.com')
+    expect(composerArgs.subject).toBe('Hello')
+    expect(composerArgs.text).toBe('World')
+    expect(composerArgs.cc).toBe('cc@test.com')
+    expect(composerArgs.bcc).toBe('bcc@test.com')
+
+    // Verify sendMail was called with raw buffer and envelope
+    expect(mockSendMail).toHaveBeenCalledWith({
+      raw: expect.any(Buffer),
+      envelope: {
+        from: 'test@gmail.com',
+        to: ['recipient@test.com', 'cc@test.com', 'bcc@test.com']
+      }
+    })
   })
 
-  it('includes a sanitised HTML part (no script, no javascript: links)', async () => {
-    const raw = await composeNewEmail(account, {
-      to: 'a@example.com',
-      subject: 's',
-      body: '# Title\n\n**bold** and [x](javascript:alert(1))\n\n<script>alert(1)</script>'
+  it('includes HTML version of the body', async () => {
+    await sendNewEmail(account, {
+      to: 'r@test.com',
+      subject: 'Test',
+      body: 'Simple line'
     })
-    const html = String((await simpleParser(raw)).html)
-    expect(html).toContain('<strong>bold</strong>')
-    expect(html).not.toContain('<script')
-    expect(html).not.toMatch(/href=["']?javascript:/i)
+
+    const composerArgs = (MockMailComposer as any).mock.calls[0]![0]
+    expect(composerArgs.html).toContain('<p>Simple line</p>')
+  })
+
+  it('converts markdown headings to HTML', async () => {
+    await sendNewEmail(account, {
+      to: 'r@test.com',
+      subject: 'Test',
+      body: '# Title\n## Subtitle\n### Section'
+    })
+
+    const composerArgs = (MockMailComposer as any).mock.calls[0]![0]
+    expect(composerArgs.html).toContain('<h1>Title</h1>')
+    expect(composerArgs.html).toContain('<h2>Subtitle</h2>')
+    expect(composerArgs.html).toContain('<h3>Section</h3>')
+  })
+
+  it('converts list items to HTML', async () => {
+    await sendNewEmail(account, {
+      to: 'r@test.com',
+      subject: 'Test',
+      body: '- Item 1\n- Item 2'
+    })
+
+    const composerArgs = (MockMailComposer as any).mock.calls[0]![0]
+    expect(composerArgs.html).toContain('<li>Item 1</li>')
+    expect(composerArgs.html).toContain('<li>Item 2</li>')
+  })
+
+  it('converts bold text to HTML', async () => {
+    await sendNewEmail(account, {
+      to: 'r@test.com',
+      subject: 'Test',
+      body: '**Important**'
+    })
+
+    const composerArgs = (MockMailComposer as any).mock.calls[0]![0]
+    expect(composerArgs.html).toContain('<strong>Important</strong>')
+  })
+
+  it('converts empty lines to br tags', async () => {
+    await sendNewEmail(account, {
+      to: 'r@test.com',
+      subject: 'Test',
+      body: 'Line 1\n\nLine 2'
+    })
+
+    const composerArgs = (MockMailComposer as any).mock.calls[0]![0]
+    expect(composerArgs.html).toContain('<p>Line 1</p>')
+    expect(composerArgs.html).toContain('<p>Line 2</p>')
+  })
+
+  it('escapes HTML entities in body to prevent XSS', async () => {
+    await sendNewEmail(account, {
+      to: 'r@test.com',
+      subject: 'Test',
+      body: '<script>alert("xss")</script>\n# <img src=x onerror=alert(1)>'
+    })
+
+    const composerArgs = (MockMailComposer as any).mock.calls[0]![0]
+    expect(composerArgs.html).not.toContain('alert("xss")')
+    expect(composerArgs.html).not.toContain('onerror')
+    expect(composerArgs.html).not.toContain('<script>')
+  })
+
+  it('strips javascript: links to prevent XSS', async () => {
+    await sendNewEmail(account, {
+      to: 'r@test.com',
+      subject: 'Test',
+      body: '[Click](javascript:alert("XSS")) and [Safe](https://example.com)'
+    })
+
+    const composerArgs = (MockMailComposer as any).mock.calls[0]![0]
+    expect(composerArgs.html).not.toContain('javascript:')
+    expect(composerArgs.html).toContain('https://example.com')
+    expect(composerArgs.html).toContain('Click')
+  })
+
+  it('strips data: and vbscript: URI schemes', async () => {
+    await sendNewEmail(account, {
+      to: 'r@test.com',
+      subject: 'Test',
+      body: '![img](data:text/html,<script>alert(1)</script>)'
+    })
+
+    const composerArgs = (MockMailComposer as any).mock.calls[0]![0]
+    expect(composerArgs.html).not.toContain('data:text/html')
+  })
+
+  it('supports markdown blockquotes', async () => {
+    await sendNewEmail(account, {
+      to: 'r@test.com',
+      subject: 'Test',
+      body: '> Quoted text'
+    })
+
+    const composerArgs = (MockMailComposer as any).mock.calls[0]![0]
+    expect(composerArgs.html).toContain('<blockquote>')
+    expect(composerArgs.html).toContain('Quoted text')
+  })
+
+  it('always closes transport', async () => {
+    await sendNewEmail(account, { to: 'r@test.com', subject: 'T', body: 'B' })
+
+    expect(mockClose).toHaveBeenCalled()
+  })
+
+  it('closes transport even on error', async () => {
+    mockSendMail.mockRejectedValue(new Error('SMTP error'))
+
+    await expect(sendNewEmail(account, { to: 'r@test.com', subject: 'T', body: 'B' })).rejects.toThrow()
+
+    expect(mockClose).toHaveBeenCalled()
+  })
+
+  it('creates transport with correct SMTP config', async () => {
+    await sendNewEmail(account, { to: 'r@test.com', subject: 'T', body: 'B' })
+
+    expect(createTransport).toHaveBeenCalledWith({
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true,
+      requireTLS: false,
+      auth: { user: 'test@gmail.com', pass: 'testpass' }
+    })
+  })
+
+  it('enforces TLS for port 587 (STARTTLS)', async () => {
+    const outlookAccount: AccountConfig = {
+      id: 'test_outlook_com',
+      email: 'test@outlook.com',
+      password: 'testpass',
+      imap: { host: 'outlook.office365.com', port: 993, secure: true },
+      smtp: { host: 'smtp.office365.com', port: 587, secure: false }
+    }
+
+    await sendNewEmail(outlookAccount, { to: 'r@test.com', subject: 'T', body: 'B' })
+
+    expect(createTransport).toHaveBeenCalledWith({
+      host: 'smtp.office365.com',
+      port: 587,
+      secure: false,
+      requireTLS: true,
+      auth: { user: 'test@outlook.com', pass: 'testpass' }
+    })
+  })
+
+  it('handles empty messageId in response', async () => {
+    mockSendMail.mockResolvedValue({})
+
+    const result = await sendNewEmail(account, { to: 'r@test.com', subject: 'T', body: 'B' })
+
+    expect(result.message_id).toBe('')
+  })
+
+  it('returns raw buffer from MailComposer build', async () => {
+    const rawBuf = Buffer.from('test-raw-message')
+    mockBuild.mockResolvedValue(rawBuf)
+
+    const result = await sendNewEmail(account, { to: 'r@test.com', subject: 'T', body: 'B' })
+
+    expect(result.raw).toBe(rawBuf)
+  })
+
+  it('does not include an attachments key in mailOptions when none are provided', async () => {
+    await sendNewEmail(account, { to: 'r@test.com', subject: 'T', body: 'B' })
+
+    const composerArgs = (MockMailComposer as any).mock.calls[0]![0]
+    expect(composerArgs).not.toHaveProperty('attachments')
+  })
+
+  it('maps base64 attachments to Nodemailer format', async () => {
+    await sendNewEmail(account, {
+      to: 'r@test.com',
+      subject: 'T',
+      body: 'B',
+      attachments: [
+        { filename: 'a.txt', content_base64: Buffer.from('hello').toString('base64'), content_type: 'text/plain' }
+      ]
+    })
+
+    const composerArgs = (MockMailComposer as any).mock.calls[0]![0]
+    expect(composerArgs.attachments).toEqual([
+      { filename: 'a.txt', content: Buffer.from('hello'), contentType: 'text/plain' }
+    ])
   })
 })
 
-describe('composeReply', () => {
-  it('sets threading headers and prefixes Re: once', async () => {
-    const raw = await composeReply(account, {
-      to: 'a@example.com',
-      subject: 'Plans',
-      body: 'Sounds good',
-      in_reply_to: '<orig@example.com>',
-      references: '<root@example.com> <orig@example.com>'
-    })
-    const h = headers(raw)
-    expect(h).toContain('Subject: Re: Plans')
-    expect(h).toContain('In-Reply-To: <orig@example.com>')
-    expect(h).toContain('References: <root@example.com> <orig@example.com>')
+// ============================================================================
+// replyToEmail
+// ============================================================================
 
-    const again = headers(
-      await composeReply(account, { to: 'a@example.com', subject: 'Re: Plans', body: 'x', in_reply_to: '<o@e>' })
-    )
-    expect(again).toContain('Subject: Re: Plans')
-    expect(again).not.toContain('Re: Re:')
+describe('replyToEmail', () => {
+  it('sends reply with In-Reply-To and References headers', async () => {
+    const result = await replyToEmail(account, {
+      to: 'original@test.com',
+      subject: 'Original Subject',
+      body: 'My reply',
+      in_reply_to: '<original123@test>',
+      references: '<ref1@test> <original123@test>'
+    })
+
+    expect(result.success).toBe(true)
+    const composerArgs = (MockMailComposer as any).mock.calls[0]![0]
+    expect(composerArgs.subject).toBe('Re: Original Subject')
+    expect(composerArgs.inReplyTo).toBe('<original123@test>')
+    expect(composerArgs.references).toBe('<ref1@test> <original123@test>')
   })
 
-  it('uses in_reply_to as references when none are given', async () => {
-    const h = headers(await composeReply(account, { to: 'a@e.com', subject: 's', body: 'b', in_reply_to: '<o@e>' }))
-    expect(h).toContain('References: <o@e>')
+  it('does not double-prepend Re: prefix', async () => {
+    await replyToEmail(account, {
+      to: 'x@test.com',
+      subject: 'Re: Already has prefix',
+      body: 'reply',
+      in_reply_to: '<msg@test>'
+    })
+
+    const composerArgs = (MockMailComposer as any).mock.calls[0]![0]
+    expect(composerArgs.subject).toBe('Re: Already has prefix')
+  })
+
+  it('uses in_reply_to as references fallback', async () => {
+    await replyToEmail(account, {
+      to: 'x@test.com',
+      subject: 'Test',
+      body: 'reply',
+      in_reply_to: '<msg@test>'
+      // no references provided
+    })
+
+    const composerArgs = (MockMailComposer as any).mock.calls[0]![0]
+    expect(composerArgs.references).toBe('<msg@test>')
   })
 
   it('throws when in_reply_to is missing', async () => {
-    await expect(composeReply(account, { to: 'a@e.com', subject: 's', body: 'b' })).rejects.toThrow('in_reply_to')
+    await expect(
+      replyToEmail(account, {
+        to: 'x@test.com',
+        subject: 'Test',
+        body: 'reply'
+        // no in_reply_to
+      })
+    ).rejects.toThrow('in_reply_to is required')
   })
-})
 
-describe('composeForward', () => {
-  it('appends the original body and prefixes Fwd: once', async () => {
-    const raw = await composeForward(account, {
-      to: 'a@example.com',
-      subject: 'Report',
-      body: 'FYI',
-      original_body: 'Original text here'
+  it('returns raw buffer', async () => {
+    const result = await replyToEmail(account, {
+      to: 'x@test.com',
+      subject: 'Test',
+      body: 'reply',
+      in_reply_to: '<msg@test>'
     })
-    expect(headers(raw)).toContain('Subject: Fwd: Report')
-    expect(raw.toString()).toContain('---------- Forwarded message ----------')
-    expect(raw.toString()).toContain('Original text here')
 
-    const again = headers(
-      await composeForward(account, { to: 'a@e.com', subject: 'Fwd: Report', body: 'x', original_body: 'y' })
-    )
-    expect(again).not.toContain('Fwd: Fwd:')
+    expect(result.raw).toBeInstanceOf(Buffer)
+  })
+
+  it('maps base64 attachments to Nodemailer format', async () => {
+    await replyToEmail(account, {
+      to: 'x@test.com',
+      subject: 'Test',
+      body: 'reply',
+      in_reply_to: '<msg@test>',
+      attachments: [{ filename: 'a.txt', content_base64: Buffer.from('hi').toString('base64') }]
+    })
+
+    const composerArgs = (MockMailComposer as any).mock.calls[0]![0]
+    expect(composerArgs.attachments).toEqual([
+      { filename: 'a.txt', content: Buffer.from('hi'), contentType: undefined }
+    ])
   })
 })
 
-describe('no sending (home-mcp fork)', () => {
-  it('exports no send function', () => {
-    const names = Object.keys(composer)
-    expect(names.filter((n) => /send|transport/i.test(n))).toEqual([])
+// ============================================================================
+// forwardEmail
+// ============================================================================
+
+describe('forwardEmail', () => {
+  it('forwards email with original body appended', async () => {
+    const result = await forwardEmail(account, {
+      to: 'forward@test.com',
+      subject: 'Original Subject',
+      body: 'Check this out',
+      original_body: 'This is the original email content'
+    })
+
+    expect(result.success).toBe(true)
+    const composerArgs = (MockMailComposer as any).mock.calls[0]![0]
+    expect(composerArgs.subject).toBe('Fwd: Original Subject')
+    expect(composerArgs.text).toContain('Check this out')
+    expect(composerArgs.text).toContain('---------- Forwarded message ----------')
+    expect(composerArgs.text).toContain('This is the original email content')
+  })
+
+  it('does not double-prepend Fwd: prefix', async () => {
+    await forwardEmail(account, {
+      to: 'x@test.com',
+      subject: 'Fwd: Already forwarded',
+      body: 'fwd',
+      original_body: 'original'
+    })
+
+    const composerArgs = (MockMailComposer as any).mock.calls[0]![0]
+    expect(composerArgs.subject).toBe('Fwd: Already forwarded')
+  })
+
+  it('includes cc and bcc when provided', async () => {
+    await forwardEmail(account, {
+      to: 'x@test.com',
+      subject: 'Test',
+      body: 'fwd',
+      cc: 'cc@test.com',
+      bcc: 'bcc@test.com',
+      original_body: 'orig'
+    })
+
+    const composerArgs = (MockMailComposer as any).mock.calls[0]![0]
+    expect(composerArgs.cc).toBe('cc@test.com')
+    expect(composerArgs.bcc).toBe('bcc@test.com')
+  })
+
+  it('returns raw buffer', async () => {
+    const result = await forwardEmail(account, {
+      to: 'x@test.com',
+      subject: 'Test',
+      body: 'fwd',
+      original_body: 'orig'
+    })
+
+    expect(result.raw).toBeInstanceOf(Buffer)
+  })
+
+  it('maps base64 attachments to Nodemailer format', async () => {
+    await forwardEmail(account, {
+      to: 'x@test.com',
+      subject: 'Test',
+      body: 'fwd',
+      original_body: 'orig',
+      attachments: [{ filename: 'a.txt', content_base64: Buffer.from('hi').toString('base64') }]
+    })
+
+    const composerArgs = (MockMailComposer as any).mock.calls[0]![0]
+    expect(composerArgs.attachments).toEqual([
+      { filename: 'a.txt', content: Buffer.from('hi'), contentType: undefined }
+    ])
+  })
+})
+
+// ============================================================================
+// OAuth2 SMTP authentication
+// ============================================================================
+
+describe('OAuth2 SMTP authentication', () => {
+  const oauth2Account: AccountConfig = {
+    id: 'test_outlook_com',
+    email: 'test@outlook.com',
+    password: '',
+    authType: 'oauth2',
+    imap: { host: 'outlook.office365.com', port: 993, secure: true },
+    smtp: { host: 'smtp.office365.com', port: 587, secure: false },
+    oauth2: {
+      accessToken: 'outlook-access-token',
+      refreshToken: 'outlook-refresh-token',
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      clientId: 'test-client-id'
+    }
+  }
+
+  it('allows interactive OAuth authentication before explicit SMTP sends', async () => {
+    await sendNewEmail(oauth2Account, { to: 'r@test.com', subject: 'T', body: 'B' })
+
+    expect(ensureValidToken).toHaveBeenCalledWith(oauth2Account, { allowInteractive: true })
+  })
+
+  it('creates transport with OAuth2 auth for Outlook accounts', async () => {
+    await sendNewEmail(oauth2Account, { to: 'r@test.com', subject: 'T', body: 'B' })
+
+    expect(createTransport).toHaveBeenCalledWith({
+      host: 'smtp.office365.com',
+      port: 587,
+      secure: false,
+      requireTLS: true,
+      auth: { type: 'OAuth2', user: 'test@outlook.com', accessToken: 'outlook-access-token' }
+    })
+  })
+
+  it('does not call ensureValidToken for password accounts', async () => {
+    vi.mocked(ensureValidToken).mockClear()
+
+    await sendNewEmail(account, { to: 'r@test.com', subject: 'T', body: 'B' })
+
+    expect(ensureValidToken).not.toHaveBeenCalled()
+  })
+
+  it('creates transport with password auth for non-OAuth2 accounts', async () => {
+    await sendNewEmail(account, { to: 'r@test.com', subject: 'T', body: 'B' })
+
+    expect(createTransport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        auth: { user: 'test@gmail.com', pass: 'testpass' }
+      })
+    )
   })
 })

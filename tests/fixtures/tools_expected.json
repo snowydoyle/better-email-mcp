@@ -1,9 +1,9 @@
 {
   "tools": [
     "messages",
-    "draft_email",
-    "draft_reply",
-    "draft_forward",
+    "send_email",
+    "reply_email",
+    "forward_email",
     "move_to_deleted",
     "folders",
     "attachments",

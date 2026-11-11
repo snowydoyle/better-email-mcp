@@ -17,8 +17,13 @@ vi.mock('../helpers/imap-client.js', async (importOriginal) => {
   }
 })
 
+vi.mock('./send.js', () => ({
+  send: vi.fn()
+}))
+
 import { listFolders, modifyFlags, moveEmails, moveToDeleted, readEmail, searchEmails } from '../helpers/imap-client.js'
 import { clearArchiveFolderCache, messages, moveToDeletedTool } from './messages.js'
+import { send } from './send.js'
 
 const mockSearchEmails = vi.mocked(searchEmails)
 const mockReadEmail = vi.mocked(readEmail)
@@ -26,6 +31,7 @@ const mockModifyFlags = vi.mocked(modifyFlags)
 const mockMoveEmails = vi.mocked(moveEmails)
 const mockMoveToDeleted = vi.mocked(moveToDeleted)
 const mockListFolders = vi.mocked(listFolders)
+const mockSend = vi.mocked(send)
 
 const accounts: AccountConfig[] = [
   {
@@ -427,7 +433,7 @@ describe('messages - archive', () => {
 // ============================================================================
 
 describe('messages - removed actions (home-mcp fork)', () => {
-  it.each(['trash', 'new', 'reply', 'forward'])('rejects %s and changes nothing', async (action) => {
+  it.each(['trash', 'new', 'reply', 'forward'])('rejects %s and calls neither IMAP nor SMTP', async (action) => {
     await expect(
       messages(accounts, {
         action: action as any,
@@ -438,6 +444,7 @@ describe('messages - removed actions (home-mcp fork)', () => {
         body: 'b'
       } as any)
     ).rejects.toThrow()
+    expect(mockSend).not.toHaveBeenCalled()
     expect(mockMoveEmails).not.toHaveBeenCalled()
     expect(mockMoveToDeleted).not.toHaveBeenCalled()
   })

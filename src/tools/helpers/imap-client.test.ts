@@ -50,7 +50,6 @@ import { ImapFlow } from 'imapflow'
 import { simpleParser } from 'mailparser'
 import {
   appendToFolder,
-  clearDraftsFolderCache,
   clearSentFolderCache,
   clearTrashFolderCache,
   getAttachment,
@@ -61,10 +60,8 @@ import {
   moveEmails,
   moveToDeleted,
   readEmail,
-  resolveDraftsFolder,
   resolveSentFolder,
   resolveTrashFolder,
-  saveDraft,
   searchEmails
 } from './imap-client.js'
 import { ensureValidToken } from './oauth2.js'
@@ -668,46 +665,6 @@ describe('moveToDeleted', () => {
     expect(isTrashFolder({ path: 'Papierkorb', flags: ['\\Trash'] })).toBe(true)
     expect(isTrashFolder({ path: 'Deleted Messages', flags: [] })).toBe(true)
     expect(isTrashFolder({ path: 'Archive', flags: ['\\Archive'] })).toBe(false)
-  })
-})
-
-describe('saveDraft (home-mcp fork)', () => {
-  beforeEach(() => {
-    clearDraftsFolderCache()
-    mockClient.append.mockReset()
-  })
-
-  it('appends to the folder flagged \\Drafts with \\Draft and \\Seen flags', async () => {
-    mockClient.list.mockResolvedValue([
-      { name: 'INBOX', path: 'INBOX', flags: new Set(), delimiter: '/' },
-      { name: 'Drafts', path: 'Drafts', flags: new Set(['\\Drafts']), delimiter: '/' }
-    ])
-    mockClient.append.mockResolvedValue({ uid: 9 })
-
-    const raw = Buffer.from('Subject: x\r\n\r\nbody')
-    const result = await saveDraft(account, raw)
-
-    expect(mockClient.append).toHaveBeenCalledWith('Drafts', raw, ['\\Draft', '\\Seen'], expect.any(Date))
-    expect(result).toEqual({ drafts_folder: 'Drafts' })
-  })
-
-  it('saves nothing and errors when there is no Drafts folder', async () => {
-    mockClient.list.mockResolvedValue([{ name: 'INBOX', path: 'INBOX', flags: new Set(), delimiter: '/' }])
-    await expect(saveDraft(account, Buffer.from('x'))).rejects.toThrow(/Could not find a Drafts folder/)
-    expect(mockClient.append).not.toHaveBeenCalled()
-  })
-
-  it('errors when the server rejects the draft', async () => {
-    mockClient.list.mockResolvedValue([
-      { name: 'Drafts', path: 'Drafts', flags: new Set(['\\Drafts']), delimiter: '/' }
-    ])
-    mockClient.append.mockResolvedValue(false)
-    await expect(saveDraft(account, Buffer.from('x'))).rejects.toThrow(/did not accept the draft/)
-  })
-
-  it('finds Drafts by name when no folder is flagged', async () => {
-    mockClient.list.mockResolvedValue([{ name: 'Drafts', path: 'Drafts', flags: new Set(), delimiter: '/' }])
-    expect(await resolveDraftsFolder(account)).toBe('Drafts')
   })
 })
 
